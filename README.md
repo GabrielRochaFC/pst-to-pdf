@@ -1,4 +1,4 @@
-# PST to PDF Local Pipeline
+# Local PST to PDF Pipeline
 
 This project converts Outlook PST email data into readable PDF files on a local Linux machine. PST, EML, PDF, manifest, and log files stay local.
 
@@ -6,7 +6,7 @@ The scripts do not print email bodies to the terminal and do not use cloud servi
 
 ## System Dependencies
 
-Run the environment check:
+Run:
 
 ```bash
 scripts/check_environment.sh
@@ -29,149 +29,143 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-The converter supports two local PDF engines:
+## Recommended Multi-PST Workflow
 
-- `--mode fast`: ReportLab text-only PDF generation. This is the default and recommended for large batches.
-- `--mode weasyprint`: WeasyPrint rendering from constructed, escaped HTML. External resource loading is disabled.
-
-## Test PST Placement
-
-Place the test PST at:
+Use one case directory per person/user. Put all PST files for that person in `input/`:
 
 ```text
-input/teste.pst
+/mnt/hd/pst-pdf-incra/example-user/
+├── input/
+│   ├── example.user@example.local.001.pst
+│   └── example.user@example.local.002.pst
+├── output/
+└── logs/
 ```
 
-The `.gitignore` excludes `input/`, `output/`, `logs/`, PST/OST/EML/PDF/CSV/log files, and `.venv/`.
-
-## Extract PST
+Create the input directory and copy PSTs:
 
 ```bash
-scripts/extract_pst.sh input/teste.pst output/teste/eml
+mkdir -p "/mnt/hd/pst-pdf-incra/example-user/input"
+cp "$HOME/Downloads/"*.pst "/mnt/hd/pst-pdf-incra/example-user/input/"
 ```
 
-If the output directory already contains files, extraction refuses to continue unless `--force` is passed. The script does not delete existing data.
+Run everything with the defaults:
 
-## Convert EML to PDF
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user"
+```
 
-Fast mode, recommended for large batches:
+Defaults:
+
+- `--mode fast`
+- `--workers 8`
+- `--timeout-seconds 60`
+- conversion resumes safely by default
+
+The output is created per PST:
+
+```text
+output/<pst-slug>/eml/
+output/<pst-slug>/pdf/
+output/<pst-slug>/manifest/<pst-slug>.csv
+logs/
+```
+
+For `example.user@example.local.001.pst`, the slug is `example-user-001`.
+
+## Resume and Pause
+
+To pause, press `Ctrl+C`. Existing EML, PDF, manifest, and log files are kept.
+
+To resume, run the same command again:
+
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user"
+```
+
+The script skips PST extraction when EML files already exist, and it runs conversion with resume behavior.
+
+## Validation
+
+Validate every PST output in the case directory:
+
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+  --validate-only
+```
+
+Validation reports total EML files, PDF files, manifest rows, successful rows, failed rows, timeout rows, duplicate EML rows, and missing PDFs for successful rows. It does not print email body content.
+
+## Dry Run
+
+Preview the planned directories and commands without creating files or processing PSTs:
+
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+  --dry-run
+```
+
+## Advanced Options
+
+Use fewer workers if the machine becomes overloaded:
+
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+  --workers 4
+```
+
+Use WeasyPrint instead of the default fast ReportLab mode:
+
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+  --mode weasyprint
+```
+
+Force re-extraction of PSTs into existing EML directories:
+
+```bash
+.venv/bin/python scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+  --force-extract
+```
+
+`--force-extract` does not delete existing files; it lets `readpst` write into the existing directory.
+
+## Lower-Level Commands
+
+The lower-level scripts are still available when you need explicit paths.
+
+Extract one PST:
+
+```bash
+scripts/extract_pst.sh input/sample.pst output/sample/eml
+```
+
+Convert one extracted EML tree:
 
 ```bash
 .venv/bin/python scripts/convert_eml_to_pdf.py \
-  --source-pst input/teste.pst \
-  --eml-dir output/teste/eml \
-  --pdf-dir output/teste/pdf \
-  --manifest output/teste/manifest/teste.csv \
-  --log-file logs/convert_teste_fast.log \
-  --mode fast \
-  --workers 2 \
-  --timeout-seconds 60
+  --source-pst input/sample.pst \
+  --eml-dir output/sample/eml \
+  --pdf-dir output/sample/pdf \
+  --manifest output/sample/manifest/sample.csv \
+  --log-file logs/convert_sample.log \
+  --resume
 ```
 
-WeasyPrint mode:
-
-```bash
-.venv/bin/python scripts/convert_eml_to_pdf.py \
-  --source-pst input/teste.pst \
-  --eml-dir output/teste/eml \
-  --pdf-dir output/teste/pdf \
-  --manifest output/teste/manifest/teste.csv \
-  --log-file logs/convert_teste_weasy.log \
-  --mode weasyprint \
-  --workers 2 \
-  --timeout-seconds 120
-```
-
-Each PDF includes subject, from, to, cc, bcc, date, message-id, source EML path, attachment filenames, and the email text body. Attachment contents are not embedded.
-
-## Resume Safely
-
-Use `--resume` to continue a partial conversion. On resume, the converter:
-
-- Creates a timestamped backup of the manifest before modifying it.
-- Compacts duplicate manifest rows, preferring successful rows.
-- Skips EML files that already have a successful manifest row.
-- Detects deterministic existing PDF files and records successful manifest rows for them when possible.
-- Writes manifest rows only from the main process.
-
-Recommended resume command:
-
-```bash
-.venv/bin/python scripts/convert_eml_to_pdf.py \
-  --source-pst input/teste.pst \
-  --eml-dir output/teste/eml \
-  --pdf-dir output/teste/pdf \
-  --manifest output/teste/manifest/teste.csv \
-  --log-file logs/convert_teste_fast_resume_$(date +%Y%m%d_%H%M%S).log \
-  --resume \
-  --mode fast \
-  --workers 2 \
-  --timeout-seconds 60
-```
-
-`--workers` controls parallel message conversion. Start with `2` for predictable CPU and memory usage.
-
-`--timeout-seconds` caps one email conversion. Timed-out messages are written as `status=timeout` in the manifest and the batch continues.
-
-Progress is printed every 100 processed messages with converted, recovered, skipped, failed, timeout, and remaining counts. Email bodies are not printed.
-
-## Validate Output
-
-Run:
+Validate one output:
 
 ```bash
 .venv/bin/python scripts/validate_outputs.py \
-  --eml-dir output/teste/eml \
-  --pdf-dir output/teste/pdf \
-  --manifest output/teste/manifest/teste.csv
+  --eml-dir output/sample/eml \
+  --pdf-dir output/sample/pdf \
+  --manifest output/sample/manifest/sample.csv
 ```
 
-The validation reports:
-
-- total EML files
-- total PDF files
-- total manifest rows
-- successful rows
-- failed rows
-- timeout rows
-- duplicate EML rows
-- missing PDFs for successful rows
-
-It does not print email body content.
-
-## Run the Test Pipeline
-
-By default, the wrapper runs only the environment check:
-
-```bash
-scripts/run_test_pipeline.sh
-```
-
-After approving PST processing:
-
-```bash
-scripts/run_test_pipeline.sh --process --mode fast --workers 2 --timeout-seconds 60
-```
-
-To resume using existing EML output:
-
-```bash
-scripts/run_test_pipeline.sh --process --resume --mode fast --workers 2 --timeout-seconds 60
-```
-
-## Process Another PST Later
-
-For another PST, choose a new output name:
-
-```bash
-scripts/extract_pst.sh input/another.pst output/another/eml
-.venv/bin/python scripts/convert_eml_to_pdf.py \
-  --source-pst input/another.pst \
-  --eml-dir output/another/eml \
-  --pdf-dir output/another/pdf \
-  --manifest output/another/manifest/another.csv \
-  --log-file logs/convert_another.log \
-  --mode fast \
-  --workers 2 \
-  --timeout-seconds 60
-```
+Each PDF includes subject, from, to, cc, bcc, date, message-id, source EML path, attachment filenames, and the email text body. Attachment contents are not embedded.

@@ -474,12 +474,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="Allow writing into existing output without resume.")
     parser.add_argument("--resume", action="store_true", help="Skip successful manifest rows and append only remaining work.")
     parser.add_argument("--mode", choices=["fast", "weasyprint"], default="fast", help="PDF engine. fast uses ReportLab; weasyprint renders constructed HTML.")
-    parser.add_argument("--workers", type=int, default=2, help="Number of parallel conversion workers.")
-    parser.add_argument("--timeout-seconds", type=int, default=300, help="Per-message timeout. Use 0 to disable.")
+    parser.add_argument("--workers", type=int, default=8, help="Number of parallel conversion workers.")
+    parser.add_argument("--timeout-seconds", type=int, default=60, help="Per-message timeout. Use 0 to disable.")
     return parser.parse_args()
 
 
+def format_elapsed(seconds: float) -> str:
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def main() -> int:
+    started_at = time.monotonic()
     args = parse_args()
     if not args.source_pst.is_file():
         raise SystemExit(f"Source PST not found: {args.source_pst}")
@@ -512,71 +520,91 @@ def main() -> int:
     failed = 0
     timed_out = 0
     processed = 0
+    last_progress_reported = 0
 
     manifest_mode = "a" if args.resume and args.manifest.exists() else "w"
     context = mp.get_context("fork")
     running: list[RunningTask] = []
 
-    with args.manifest.open(manifest_mode, newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=MANIFEST_FIELDS)
-        if manifest_mode == "w":
-            writer.writeheader()
+    try:
+        with args.manifest.open(manifest_mode, newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=MANIFEST_FIELDS)
+            if manifest_mode == "w":
+                writer.writeheader()
 
-        pending = iter(all_tasks)
-        exhausted = False
-        while not exhausted or running:
-            while not exhausted and len(running) < args.workers:
-                try:
-                    task = next(pending)
-                except StopIteration:
-                    exhausted = True
-                    break
+            pending = iter(all_tasks)
+            exhausted = False
+            while not exhausted or running:
+                while not exhausted and len(running) < args.workers:
+                    try:
+                        task = next(pending)
+                    except StopIteration:
+                        exhausted = True
+                        break
 
-                if str(task.eml_path) in successful_paths:
-                    skipped += 1
-                    processed += 1
-                    continue
+                    if str(task.eml_path) in successful_paths:
+                        skipped += 1
+                        processed += 1
+                        continue
 
-                if args.resume and task.pdf_path.exists():
-                    row = recover_existing_pdf_row(task, args.source_pst, pst_sha256)
-                    successful_paths.add(str(task.eml_path))
+                    if args.resume and task.pdf_path.exists():
+                        row = recover_existing_pdf_row(task, args.source_pst, pst_sha256)
+                        successful_paths.add(str(task.eml_path))
+                        writer.writerow(row)
+                        csvfile.flush()
+                        recovered += 1
+                        processed += 1
+                        continue
+
+                    running.append(start_task(context, task, args, pst_sha256))
+
+                for row in collect_finished(running, args, pst_sha256):
                     writer.writerow(row)
                     csvfile.flush()
-                    recovered += 1
                     processed += 1
-                    continue
+                    status = row.get("status")
+                    if status == "ok":
+                        converted += 1
+                        successful_paths.add(row["eml_path"])
+                    elif status == "timeout":
+                        timed_out += 1
+                        logging.error("Timed out EML path=%s error=%s", row.get("eml_path"), row.get("error"))
+                    else:
+                        failed += 1
+                        logging.error("Failed EML path=%s error=%s", row.get("eml_path"), row.get("error"))
 
-                running.append(start_task(context, task, args, pst_sha256))
+                progress_bucket = processed // 100
+                if progress_bucket > last_progress_reported:
+                    last_progress_reported = progress_bucket
+                    remaining = total - processed
+                    elapsed = format_elapsed(time.monotonic() - started_at)
+                    print(
+                        f"progress processed={processed} converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} remaining={remaining} elapsed={elapsed}",
+                        flush=True,
+                    )
+                    logging.info("Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s", processed, converted, recovered, skipped, failed, timed_out, remaining, elapsed)
 
-            for row in collect_finished(running, args, pst_sha256):
-                writer.writerow(row)
-                csvfile.flush()
-                processed += 1
-                status = row.get("status")
-                if status == "ok":
-                    converted += 1
-                    successful_paths.add(row["eml_path"])
-                elif status == "timeout":
-                    timed_out += 1
-                    logging.error("Timed out EML path=%s error=%s", row.get("eml_path"), row.get("error"))
-                else:
-                    failed += 1
-                    logging.error("Failed EML path=%s error=%s", row.get("eml_path"), row.get("error"))
-
-            if processed and processed % 100 == 0:
-                remaining = total - processed
-                print(
-                    f"progress processed={processed} converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} remaining={remaining}",
-                    flush=True,
-                )
-                logging.info("Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s", processed, converted, recovered, skipped, failed, timed_out, remaining)
-
-            if running and (exhausted or len(running) >= args.workers):
-                time.sleep(0.2)
+                if running and (exhausted or len(running) >= args.workers):
+                    time.sleep(0.2)
+    except KeyboardInterrupt:
+        for item in running:
+            if item.process.is_alive():
+                item.process.terminate()
+                item.process.join(5)
+                if item.process.is_alive():
+                    item.process.kill()
+                    item.process.join()
+        elapsed = format_elapsed(time.monotonic() - started_at)
+        print(f"Interrupted. Partial manifest kept at {args.manifest}. Resume with --resume. elapsed={elapsed}", flush=True)
+        logging.warning("Interrupted by user elapsed=%s processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s", elapsed, processed, converted, recovered, skipped, failed, timed_out)
+        return 130
 
     final = Counter(row.get("status", "") for row in read_manifest_rows(args.manifest))
-    logging.info("Finished conversion converted=%s recovered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s", converted, recovered, skipped, failed, timed_out, dict(final), existing_rows)
-    print(f"Conversion finished. converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} manifest={args.manifest}")
+    elapsed_seconds = time.monotonic() - started_at
+    elapsed = format_elapsed(elapsed_seconds)
+    rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
+    logging.info("Finished conversion converted=%s recovered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s elapsed=%s rate_per_min=%.2f", converted, recovered, skipped, failed, timed_out, dict(final), existing_rows, elapsed, rate)
+    print(f"Conversion finished. converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} elapsed={elapsed} rate_per_min={rate:.2f} manifest={args.manifest}")
     return 0 if failed == 0 and timed_out == 0 else 1
 
 

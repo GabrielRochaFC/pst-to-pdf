@@ -27,8 +27,8 @@ process=0
 force=0
 resume=0
 mode="fast"
-workers=2
-timeout_seconds=300
+workers=8
+timeout_seconds=60
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
