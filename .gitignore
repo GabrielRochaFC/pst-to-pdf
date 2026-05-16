@@ -1,0 +1,18 @@
+.venv/
+.codex/
+.agents/
+__pycache__/
+*.py[cod]
+
+# Local source data and generated artifacts. Do not commit email data.
+input/
+output/
+logs/
+*.pst
+*.ost
+*.eml
+*.msg
+*.mbox
+*.pdf
+*.csv
+*.log
