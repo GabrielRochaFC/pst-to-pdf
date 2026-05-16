@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Convert extracted EML files to local PDF files and a manifest CSV.
 
-This script never prints email body content. Conversion errors are logged per
-message so one bad EML does not stop the whole run.
+Privacy boundary:
+  - Email bodies are parsed only to generate local PDFs.
+  - Email bodies are never printed to stdout/stderr or logs.
+  - Manifest writing happens only in the main process.
 """
 
 from __future__ import annotations
@@ -14,20 +16,18 @@ import html
 import logging
 import multiprocessing as mp
 import re
+import shutil
 import sys
+import time
+from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime
 from email import policy
+from email.message import Message
 from email.parser import BytesParser
-from email.message import EmailMessage, Message
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Iterable
-
-try:
-    from weasyprint import HTML
-except ImportError as exc:  # pragma: no cover - exercised by environment
-    raise SystemExit(
-        "Missing Python package 'weasyprint'. Create .venv and install requirements.txt first."
-    ) from exc
+from typing import Any, Iterable, cast
 
 
 MANIFEST_FIELDS = [
@@ -47,9 +47,43 @@ MANIFEST_FIELDS = [
     "error",
 ]
 
+HEADER_LABELS = [
+    "Subject",
+    "From",
+    "To",
+    "Cc",
+    "Bcc",
+    "Date",
+    "Message-ID",
+    "Source EML path",
+    "Attachment filenames",
+]
+
 
 class HTMLTextExtractor(HTMLParser):
-    BLOCK_TAGS = {"address", "article", "aside", "blockquote", "br", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "p", "pre", "section", "table", "tr"}
+    BLOCK_TAGS = {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "div",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "li",
+        "main",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "tr",
+    }
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -82,6 +116,21 @@ class HTMLTextExtractor(HTMLParser):
         return "\n".join(compact).strip()
 
 
+@dataclass(frozen=True)
+class Task:
+    index: int
+    eml_path: Path
+    pdf_path: Path
+
+
+@dataclass
+class RunningTask:
+    task: Task
+    process: mp.Process
+    queue: mp.Queue
+    started_at: float
+
+
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -101,9 +150,7 @@ def header_value(message: Message, name: str) -> str:
 
 def part_filename(part: Message) -> str | None:
     filename = part.get_filename()
-    if filename:
-        return Path(filename).name
-    return None
+    return Path(filename).name if filename else None
 
 
 def attachment_filenames(message: Message) -> list[str]:
@@ -117,7 +164,7 @@ def attachment_filenames(message: Message) -> list[str]:
 
 
 def decode_text_part(part: Message) -> str:
-    payload = part.get_payload(decode=True)
+    payload = cast(bytes | None, part.get_payload(decode=True))
     charset = part.get_content_charset() or "utf-8"
     if payload is None:
         raw = part.get_payload()
@@ -135,22 +182,43 @@ def html_to_text(value: str) -> str:
 def message_body_text(message: Message) -> str:
     plain_parts: list[str] = []
     html_parts: list[str] = []
-
     parts = message.walk() if message.is_multipart() else [message]
     for part in parts:
-        if part.is_multipart():
-            continue
-        if part.get_content_disposition() == "attachment":
+        if part.is_multipart() or part.get_content_disposition() == "attachment":
             continue
         content_type = part.get_content_type()
         if content_type == "text/plain":
             plain_parts.append(decode_text_part(part))
         elif content_type == "text/html":
             html_parts.append(html_to_text(decode_text_part(part)))
-
     if plain_parts:
         return "\n\n".join(text.strip() for text in plain_parts if text.strip()).strip()
     return "\n\n".join(text.strip() for text in html_parts if text.strip()).strip()
+
+
+def output_pdf_name(index: int, eml_path: Path, eml_root: Path) -> str:
+    rel = eml_path.relative_to(eml_root).as_posix()
+    digest = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:16]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", eml_path.stem)[:80] or "email"
+    return f"{index:08d}_{stem}_{digest}.pdf"
+
+
+def parse_message(eml_path: Path) -> tuple[dict[str, str], str]:
+    with eml_path.open("rb") as handle:
+        message = BytesParser(policy=policy.default).parse(handle)
+    attachments = attachment_filenames(message)
+    metadata = {
+        "Subject": header_value(message, "subject"),
+        "From": header_value(message, "from"),
+        "To": header_value(message, "to"),
+        "Cc": header_value(message, "cc"),
+        "Bcc": header_value(message, "bcc"),
+        "Date": header_value(message, "date"),
+        "Message-ID": header_value(message, "message-id"),
+        "Source EML path": str(eml_path),
+        "Attachment filenames": "; ".join(attachments),
+    }
+    return metadata, message_body_text(message)
 
 
 def block_external_fetches(url: str, *args: object, **kwargs: object) -> dict[str, bytes | str]:
@@ -159,8 +227,8 @@ def block_external_fetches(url: str, *args: object, **kwargs: object) -> dict[st
 
 def pdf_html(metadata: dict[str, str], body: str) -> str:
     rows = "\n".join(
-        f"<tr><th>{html.escape(label)}</th><td>{html.escape(value or '')}</td></tr>"
-        for label, value in metadata.items()
+        f"<tr><th>{html.escape(label)}</th><td>{html.escape(metadata.get(label, ''))}</td></tr>"
+        for label in HEADER_LABELS
     )
     safe_body = html.escape(body or "[No text body found]")
     return f"""<!doctype html>
@@ -185,35 +253,54 @@ def pdf_html(metadata: dict[str, str], body: str) -> str:
 </html>"""
 
 
-def output_pdf_name(index: int, eml_path: Path, eml_root: Path) -> str:
-    rel = eml_path.relative_to(eml_root).as_posix()
-    digest = hashlib.sha256(rel.encode("utf-8")).hexdigest()[:16]
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", eml_path.stem)[:80] or "email"
-    return f"{index:08d}_{stem}_{digest}.pdf"
+def write_weasy_pdf(pdf_path: Path, metadata: dict[str, str], body: str) -> None:
+    from weasyprint import HTML
+
+    HTML(string=pdf_html(metadata, body), base_url=str(pdf_path.parent), url_fetcher=block_external_fetches).write_pdf(pdf_path)
 
 
-def convert_one(index: int, eml_path: Path, eml_root: Path, pdf_dir: Path, source_pst: Path, pst_sha256: str) -> dict[str, str]:
-    with eml_path.open("rb") as handle:
-        message = BytesParser(policy=policy.default).parse(handle)
+def reportlab_text(value: str) -> str:
+    return html.escape(value or "").replace("\n", "<br/>")
 
-    attachments = attachment_filenames(message)
-    pdf_path = pdf_dir / output_pdf_name(index, eml_path, eml_root)
 
-    metadata = {
-        "Subject": header_value(message, "subject"),
-        "From": header_value(message, "from"),
-        "To": header_value(message, "to"),
-        "Cc": header_value(message, "cc"),
-        "Bcc": header_value(message, "bcc"),
-        "Date": header_value(message, "date"),
-        "Message-ID": header_value(message, "message-id"),
-        "Source EML path": str(eml_path),
-        "Attachment filenames": "; ".join(attachments),
-    }
-    body = message_body_text(message)
+def write_fast_pdf(pdf_path: Path, metadata: dict[str, str], body: str) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-    HTML(string=pdf_html(metadata, body), base_url=str(pdf_dir), url_fetcher=block_external_fetches).write_pdf(pdf_path)
+    styles = getSampleStyleSheet()
+    normal = ParagraphStyle("EmailNormal", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12)
+    heading = ParagraphStyle("EmailHeading", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=14, leading=18)
+    label = ParagraphStyle("EmailLabel", parent=normal, fontName="Helvetica-Bold")
 
+    rows = [
+        [Paragraph(reportlab_text(name), label), Paragraph(reportlab_text(metadata.get(name, "")), normal)]
+        for name in HEADER_LABELS
+    ]
+    table = Table(rows, colWidths=[42 * mm, 126 * mm], repeatRows=0)
+    table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+
+    doc = SimpleDocTemplate(str(pdf_path), pagesize=A4, rightMargin=15 * mm, leftMargin=15 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
+    story = [Paragraph("Email PDF Export", heading), Spacer(1, 5 * mm), table, Spacer(1, 6 * mm)]
+    for chunk in (body or "[No text body found]").split("\n\n"):
+        story.append(Paragraph(reportlab_text(chunk), normal))
+        story.append(Spacer(1, 3 * mm))
+    doc.build(story)
+
+
+def base_row(source_pst: Path, pst_sha256: str, eml_path: Path, pdf_path: Path, metadata: dict[str, str]) -> dict[str, str]:
     return {
         "source_pst_path": str(source_pst),
         "source_pst_sha256": pst_sha256,
@@ -226,18 +313,18 @@ def convert_one(index: int, eml_path: Path, eml_root: Path, pdf_dir: Path, sourc
         "bcc": metadata["Bcc"],
         "date": metadata["Date"],
         "message_id": metadata["Message-ID"],
-        "attachment_filenames": "|".join(attachments),
+        "attachment_filenames": metadata["Attachment filenames"].replace("; ", "|"),
         "status": "ok",
         "error": "",
     }
 
 
-def failed_row(source_pst: Path, pst_sha256: str, eml_path: Path, error: str) -> dict[str, str]:
+def status_row(source_pst: Path, pst_sha256: str, eml_path: Path, pdf_path: Path, status: str, error: str) -> dict[str, str]:
     return {
         "source_pst_path": str(source_pst),
         "source_pst_sha256": pst_sha256,
         "eml_path": str(eml_path),
-        "pdf_path": "",
+        "pdf_path": str(pdf_path) if pdf_path else "",
         "subject": "",
         "from": "",
         "to": "",
@@ -246,76 +333,135 @@ def failed_row(source_pst: Path, pst_sha256: str, eml_path: Path, error: str) ->
         "date": "",
         "message_id": "",
         "attachment_filenames": "",
-        "status": "error",
+        "status": status,
         "error": error,
     }
 
 
-def convert_worker(
-    queue: mp.Queue,
-    index: int,
-    eml_path: str,
-    eml_root: str,
-    pdf_dir: str,
-    source_pst: str,
-    pst_sha256: str,
-) -> None:
-    path = Path(eml_path)
-    pst = Path(source_pst)
+def convert_task(task: Task, eml_root: Path, source_pst: Path, pst_sha256: str, mode: str) -> dict[str, str]:
+    metadata, body = parse_message(task.eml_path)
+    if mode == "weasyprint":
+        write_weasy_pdf(task.pdf_path, metadata, body)
+    else:
+        write_fast_pdf(task.pdf_path, metadata, body)
+    return base_row(source_pst, pst_sha256, task.eml_path, task.pdf_path, metadata)
+
+
+def recover_existing_pdf_row(task: Task, source_pst: Path, pst_sha256: str) -> dict[str, str]:
+    metadata, _body = parse_message(task.eml_path)
+    return base_row(source_pst, pst_sha256, task.eml_path, task.pdf_path, metadata)
+
+
+def worker_main(queue: mp.Queue, task: Task, eml_root: str, source_pst: str, pst_sha256: str, mode: str) -> None:
     try:
-        row = convert_one(index, path, Path(eml_root), Path(pdf_dir), pst, pst_sha256)
-    except Exception as exc:  # noqa: BLE001 - error is recorded in manifest
-        row = failed_row(pst, pst_sha256, path, f"{type(exc).__name__}: {exc}")
+        row = convert_task(task, Path(eml_root), Path(source_pst), pst_sha256, mode)
+    except Exception as exc:  # noqa: BLE001 - main process records failure row
+        row = status_row(Path(source_pst), pst_sha256, task.eml_path, task.pdf_path, "error", f"{type(exc).__name__}: {exc}")
     queue.put(row)
 
 
-def convert_with_timeout(
-    index: int,
-    eml_path: Path,
-    eml_root: Path,
-    pdf_dir: Path,
-    source_pst: Path,
-    pst_sha256: str,
-    timeout_seconds: int,
-) -> dict[str, str]:
-    if timeout_seconds <= 0:
-        try:
-            return convert_one(index, eml_path, eml_root, pdf_dir, source_pst, pst_sha256)
-        except Exception as exc:  # noqa: BLE001 - error is recorded in manifest
-            return failed_row(source_pst, pst_sha256, eml_path, f"{type(exc).__name__}: {exc}")
+def read_manifest_rows(manifest: Path) -> list[dict[str, str]]:
+    if not manifest.exists():
+        return []
+    with manifest.open("r", newline="", encoding="utf-8") as csvfile:
+        return list(csv.DictReader(csvfile))
 
-    context = mp.get_context("fork")
+
+def preferred_row(existing: dict[str, str] | None, candidate: dict[str, str]) -> dict[str, str]:
+    if existing is None:
+        return candidate
+    if existing.get("status") == "ok":
+        return existing
+    if candidate.get("status") == "ok":
+        return candidate
+    return candidate
+
+
+def deduplicate_manifest_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    by_eml: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for row in rows:
+        eml_path = row.get("eml_path", "")
+        if not eml_path:
+            continue
+        if eml_path not in by_eml:
+            order.append(eml_path)
+        by_eml[eml_path] = preferred_row(by_eml.get(eml_path), row)
+    return [by_eml[eml_path] for eml_path in order]
+
+
+def backup_manifest(manifest: Path) -> Path | None:
+    if not manifest.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = manifest.with_name(f"{manifest.name}.bak_{stamp}")
+    shutil.copy2(manifest, backup)
+    return backup
+
+
+def write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=MANIFEST_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in MANIFEST_FIELDS})
+
+
+def prepare_manifest(manifest: Path, resume: bool) -> tuple[set[str], int, Path | None]:
+    rows = read_manifest_rows(manifest)
+    backup = None
+    if rows and resume:
+        compact = deduplicate_manifest_rows(rows)
+        backup = backup_manifest(manifest)
+        rows = [row for row in compact if row.get("status") == "ok"]
+        write_manifest(manifest, rows)
+    successful = {row["eml_path"] for row in rows if row.get("status") == "ok" and row.get("eml_path")}
+    return successful, len(rows), backup
+
+
+def ensure_safe_outputs(pdf_dir: Path, manifest: Path, force: bool, resume: bool) -> None:
+    if resume:
+        return
+    if pdf_dir.exists() and any(pdf_dir.iterdir()) and not force:
+        raise SystemExit(f"PDF output directory is not empty: {pdf_dir}. Re-run with --resume or --force.")
+    if manifest.exists() and not force:
+        raise SystemExit(f"Manifest already exists: {manifest}. Re-run with --resume or --force.")
+
+
+def start_task(context: Any, task: Task, args: argparse.Namespace, pst_sha256: str) -> RunningTask:
     queue: mp.Queue = context.Queue(maxsize=1)
     process = context.Process(
-        target=convert_worker,
-        args=(queue, index, str(eml_path), str(eml_root), str(pdf_dir), str(source_pst), pst_sha256),
+        target=worker_main,
+        args=(queue, task, str(args.eml_dir), str(args.source_pst), pst_sha256, args.mode),
     )
     process.start()
-    process.join(timeout_seconds)
-
-    if process.is_alive():
-        process.terminate()
-        process.join(10)
-        if process.is_alive():
-            process.kill()
-            process.join()
-        return failed_row(source_pst, pst_sha256, eml_path, f"Timeout after {timeout_seconds} seconds")
-
-    if process.exitcode != 0 and queue.empty():
-        return failed_row(source_pst, pst_sha256, eml_path, f"Worker exited with code {process.exitcode}")
-
-    if queue.empty():
-        return failed_row(source_pst, pst_sha256, eml_path, "Worker exited without returning a result")
-
-    return queue.get()
+    return RunningTask(task=task, process=process, queue=queue, started_at=time.monotonic())
 
 
-def load_existing_manifest_rows(manifest: Path) -> set[str]:
-    if not manifest.exists():
-        return set()
-    with manifest.open("r", newline="", encoding="utf-8") as csvfile:
-        reader = csv.DictReader(csvfile)
-        return {row["eml_path"] for row in reader if row.get("eml_path")}
+def collect_finished(running: list[RunningTask], args: argparse.Namespace, pst_sha256: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    still_running: list[RunningTask] = []
+    now = time.monotonic()
+    for item in running:
+        timed_out = args.timeout_seconds > 0 and now - item.started_at > args.timeout_seconds
+        if timed_out:
+            item.process.terminate()
+            item.process.join(5)
+            if item.process.is_alive():
+                item.process.kill()
+                item.process.join()
+            rows.append(status_row(args.source_pst, pst_sha256, item.task.eml_path, item.task.pdf_path, "timeout", f"Timeout after {args.timeout_seconds} seconds"))
+            continue
+        if item.process.is_alive():
+            still_running.append(item)
+            continue
+        item.process.join()
+        if not item.queue.empty():
+            rows.append(item.queue.get())
+        else:
+            rows.append(status_row(args.source_pst, pst_sha256, item.task.eml_path, item.task.pdf_path, "error", f"Worker exited with code {item.process.exitcode}"))
+    running[:] = still_running
+    return rows
 
 
 def parse_args() -> argparse.Namespace:
@@ -325,19 +471,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pdf-dir", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--log-file", required=True, type=Path)
-    parser.add_argument("--force", action="store_true", help="Allow writing into existing non-empty PDF/manifest locations.")
-    parser.add_argument("--resume", action="store_true", help="Append to an existing manifest and skip EML paths already listed there.")
-    parser.add_argument("--timeout-seconds", type=int, default=300, help="Per-message conversion timeout. Use 0 to disable.")
+    parser.add_argument("--force", action="store_true", help="Allow writing into existing output without resume.")
+    parser.add_argument("--resume", action="store_true", help="Skip successful manifest rows and append only remaining work.")
+    parser.add_argument("--mode", choices=["fast", "weasyprint"], default="fast", help="PDF engine. fast uses ReportLab; weasyprint renders constructed HTML.")
+    parser.add_argument("--workers", type=int, default=2, help="Number of parallel conversion workers.")
+    parser.add_argument("--timeout-seconds", type=int, default=300, help="Per-message timeout. Use 0 to disable.")
     return parser.parse_args()
-
-
-def ensure_safe_outputs(pdf_dir: Path, manifest: Path, force: bool, resume: bool) -> None:
-    if resume:
-        return
-    if pdf_dir.exists() and any(pdf_dir.iterdir()) and not force:
-        raise SystemExit(f"PDF output directory is not empty: {pdf_dir}. Re-run with --force to allow writing into it.")
-    if manifest.exists() and not force:
-        raise SystemExit(f"Manifest already exists: {manifest}. Re-run with --force to replace it.")
 
 
 def main() -> int:
@@ -346,57 +485,99 @@ def main() -> int:
         raise SystemExit(f"Source PST not found: {args.source_pst}")
     if not args.eml_dir.is_dir():
         raise SystemExit(f"EML directory not found: {args.eml_dir}")
+    if args.workers < 1:
+        raise SystemExit("--workers must be >= 1")
 
     ensure_safe_outputs(args.pdf_dir, args.manifest, args.force, args.resume)
     args.pdf_dir.mkdir(parents=True, exist_ok=True)
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     args.log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    logging.basicConfig(
-        filename=args.log_file,
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    logging.info("Starting conversion. Source PST=%s EML dir=%s PDF dir=%s", args.source_pst, args.eml_dir, args.pdf_dir)
+    logging.basicConfig(filename=args.log_file, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.info("Starting conversion source=%s eml_dir=%s pdf_dir=%s mode=%s workers=%s", args.source_pst, args.eml_dir, args.pdf_dir, args.mode, args.workers)
 
     pst_sha256 = sha256_file(args.source_pst)
-    processed_paths = load_existing_manifest_rows(args.manifest) if args.resume else set()
+    successful_paths, existing_rows, backup = prepare_manifest(args.manifest, args.resume)
+    if backup:
+        logging.info("Backed up manifest to %s", backup)
+
+    all_tasks = [
+        Task(index=index, eml_path=eml_path, pdf_path=args.pdf_dir / output_pdf_name(index, eml_path, args.eml_dir))
+        for index, eml_path in enumerate(iter_eml_files(args.eml_dir), start=1)
+    ]
+    total = len(all_tasks)
+    skipped = 0
+    recovered = 0
     converted = 0
     failed = 0
-    skipped = 0
+    timed_out = 0
+    processed = 0
 
-    manifest_exists = args.manifest.exists()
-    manifest_mode = "a" if args.resume and manifest_exists else "w"
+    manifest_mode = "a" if args.resume and args.manifest.exists() else "w"
+    context = mp.get_context("fork")
+    running: list[RunningTask] = []
+
     with args.manifest.open(manifest_mode, newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=MANIFEST_FIELDS)
         if manifest_mode == "w":
             writer.writeheader()
-        for index, eml_path in enumerate(iter_eml_files(args.eml_dir), start=1):
-            if str(eml_path) in processed_paths:
-                skipped += 1
-                continue
 
-            logging.info("Converting index=%s eml_path=%s", index, eml_path)
-            row = convert_with_timeout(
-                index,
-                eml_path,
-                args.eml_dir,
-                args.pdf_dir,
-                args.source_pst,
-                pst_sha256,
-                args.timeout_seconds,
-            )
-            if row["status"] == "ok":
-                converted += 1
-            else:
-                failed += 1
-                logging.error("Failed to convert EML path=%s error=%s", eml_path, row["error"])
-            writer.writerow(row)
-            csvfile.flush()
+        pending = iter(all_tasks)
+        exhausted = False
+        while not exhausted or running:
+            while not exhausted and len(running) < args.workers:
+                try:
+                    task = next(pending)
+                except StopIteration:
+                    exhausted = True
+                    break
 
-    logging.info("Finished conversion. converted=%s failed=%s skipped=%s", converted, failed, skipped)
-    print(f"Conversion finished. converted={converted} failed={failed} skipped={skipped} manifest={args.manifest}")
-    return 0 if failed == 0 else 1
+                if str(task.eml_path) in successful_paths:
+                    skipped += 1
+                    processed += 1
+                    continue
+
+                if args.resume and task.pdf_path.exists():
+                    row = recover_existing_pdf_row(task, args.source_pst, pst_sha256)
+                    successful_paths.add(str(task.eml_path))
+                    writer.writerow(row)
+                    csvfile.flush()
+                    recovered += 1
+                    processed += 1
+                    continue
+
+                running.append(start_task(context, task, args, pst_sha256))
+
+            for row in collect_finished(running, args, pst_sha256):
+                writer.writerow(row)
+                csvfile.flush()
+                processed += 1
+                status = row.get("status")
+                if status == "ok":
+                    converted += 1
+                    successful_paths.add(row["eml_path"])
+                elif status == "timeout":
+                    timed_out += 1
+                    logging.error("Timed out EML path=%s error=%s", row.get("eml_path"), row.get("error"))
+                else:
+                    failed += 1
+                    logging.error("Failed EML path=%s error=%s", row.get("eml_path"), row.get("error"))
+
+            if processed and processed % 100 == 0:
+                remaining = total - processed
+                print(
+                    f"progress processed={processed} converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} remaining={remaining}",
+                    flush=True,
+                )
+                logging.info("Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s", processed, converted, recovered, skipped, failed, timed_out, remaining)
+
+            if running and (exhausted or len(running) >= args.workers):
+                time.sleep(0.2)
+
+    final = Counter(row.get("status", "") for row in read_manifest_rows(args.manifest))
+    logging.info("Finished conversion converted=%s recovered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s", converted, recovered, skipped, failed, timed_out, dict(final), existing_rows)
+    print(f"Conversion finished. converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} manifest={args.manifest}")
+    return 0 if failed == 0 and timed_out == 0 else 1
 
 
 if __name__ == "__main__":

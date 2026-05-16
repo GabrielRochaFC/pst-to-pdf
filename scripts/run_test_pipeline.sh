@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/run_test_pipeline.sh [--process] [--force]
+  scripts/run_test_pipeline.sh [--process] [--force] [--resume] [--mode fast|weasyprint] [--workers N] [--timeout-seconds N]
 
 Default behavior:
   - Runs the environment check only.
@@ -25,6 +25,10 @@ USAGE
 
 process=0
 force=0
+resume=0
+mode="fast"
+workers=2
+timeout_seconds=300
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -33,6 +37,21 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --force)
       force=1
+      ;;
+    --resume)
+      resume=1
+      ;;
+    --mode)
+      mode="${2:-}"
+      shift
+      ;;
+    --workers)
+      workers="${2:-}"
+      shift
+      ;;
+    --timeout-seconds)
+      timeout_seconds="${2:-}"
+      shift
       ;;
     -h|--help)
       usage
@@ -78,12 +97,22 @@ if [[ "${force}" -eq 1 ]]; then
   extract_args+=(--force)
   convert_args+=(--force)
 fi
+if [[ "${resume}" -eq 1 ]]; then
+  convert_args+=(--resume)
+fi
 
-scripts/extract_pst.sh "${extract_args[@]}" "${source_pst}" "${eml_dir}"
+if [[ "${resume}" -eq 1 && -d "${eml_dir}" ]]; then
+  printf 'Resume requested and EML directory exists; skipping extraction: %s\n' "${eml_dir}"
+else
+  scripts/extract_pst.sh "${extract_args[@]}" "${source_pst}" "${eml_dir}"
+fi
 ".venv/bin/python" scripts/convert_eml_to_pdf.py \
   --source-pst "${source_pst}" \
   --eml-dir "${eml_dir}" \
   --pdf-dir "${pdf_dir}" \
   --manifest "${manifest}" \
   --log-file "${log_file}" \
+  --mode "${mode}" \
+  --workers "${workers}" \
+  --timeout-seconds "${timeout_seconds}" \
   "${convert_args[@]}"
