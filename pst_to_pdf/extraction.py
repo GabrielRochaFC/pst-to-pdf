@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -23,6 +24,84 @@ def count_files(root: Path, suffix: str) -> int:
 
 def has_eml_files(root: Path) -> bool:
     return count_files(root, ".eml") > 0
+
+
+@dataclass(frozen=True)
+class EmlTreeSnapshot:
+    count: int
+    total_size: int
+    newest_mtime: float
+
+
+def eml_tree_snapshot(root: Path) -> EmlTreeSnapshot:
+    count = 0
+    total_size = 0
+    newest_mtime = 0.0
+    if not root.exists():
+        return EmlTreeSnapshot(count=0, total_size=0, newest_mtime=0.0)
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() != ".eml":
+            continue
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        count += 1
+        total_size += stat.st_size
+        newest_mtime = max(newest_mtime, stat.st_mtime)
+    return EmlTreeSnapshot(count=count, total_size=total_size, newest_mtime=newest_mtime)
+
+
+def wait_for_stable_eml_tree(
+    root: Path,
+    label: str,
+    stable_seconds: int = 10,
+    check_interval: int = 2,
+    max_wait_seconds: int = 600,
+    dry_run: bool = False,
+) -> EmlTreeSnapshot:
+    if stable_seconds <= 0:
+        snapshot = eml_tree_snapshot(root)
+        print(f"[{label}] EML stability check disabled count={snapshot.count} size={snapshot.total_size}")
+        return snapshot
+    if check_interval <= 0:
+        raise SystemExit("--eml-stability-check-interval must be >= 1")
+    if max_wait_seconds < stable_seconds:
+        raise SystemExit("--eml-stability-max-wait must be >= --eml-stability-seconds")
+
+    initial = eml_tree_snapshot(root)
+    print(
+        f"[{label}] waiting for stable EML tree path={root} "
+        f"stable_seconds={stable_seconds} check_interval={check_interval} max_wait={max_wait_seconds} "
+        f"count={initial.count} size={initial.total_size}"
+    )
+    if dry_run:
+        return initial
+
+    started_at = time.monotonic()
+    previous = initial
+    stable_since = started_at
+    while True:
+        time.sleep(check_interval)
+        current = eml_tree_snapshot(root)
+        changed = current != previous
+        now = time.monotonic()
+        if changed:
+            print(f"[{label}] EML tree changed count={current.count} size={current.total_size}")
+            previous = current
+            stable_since = now
+        elif now - stable_since >= stable_seconds:
+            print(
+                f"[{label}] EML tree stable count={current.count} size={current.total_size} "
+                f"newest_mtime={current.newest_mtime:.6f} waited={format_elapsed(now - started_at)}"
+            )
+            return current
+
+        if now - started_at >= max_wait_seconds:
+            raise TimeoutError(
+                f"EML tree did not become stable within {max_wait_seconds} seconds: "
+                f"{root} count={current.count} size={current.total_size}"
+            )
 
 
 def ensure_readpst_available() -> None:
@@ -46,6 +125,7 @@ def extract_pst(source_pst: Path, eml_dir: Path, extract_log: Path, label: str, 
     started_at = time.monotonic()
     with extract_log.open("w", encoding="utf-8") as logfile:
         logfile.write(f"Source PST: {source_pst}\nOutput EML dir: {eml_dir}\n")
+        logfile.flush()
         result = subprocess.run(command, stdout=logfile, stderr=subprocess.STDOUT, check=False)
     elapsed = time.monotonic() - started_at
     if result.returncode != 0:

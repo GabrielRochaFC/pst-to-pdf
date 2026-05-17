@@ -180,6 +180,27 @@ python3 scripts/validate_outputs.py \
   --manifest output/sample/manifest/sample.csv
 ```
 
+Preview a safe manifest repair for selected PST output slugs:
+
+```bash
+python3 -m pst_to_pdf.repair_manifest \
+  --case-dir "/mnt/hd/pst-pdf/example-user" \
+  --slug example-user-001 \
+  --slug example-user-005
+```
+
+Apply repair only after reviewing the dry-run report:
+
+```bash
+python3 -m pst_to_pdf.repair_manifest \
+  --case-dir "/mnt/hd/pst-pdf/example-user" \
+  --slug example-user-001,example-user-005 \
+  --apply
+```
+
+Manifest repair creates timestamped backups before writing, deduplicates rows
+by `eml_path`, does not delete EML/PDF files, and does not read email bodies.
+
 The shell scripts in `scripts/` are legacy/developer helpers:
 
 - `scripts/check_environment.sh` checks local command availability.

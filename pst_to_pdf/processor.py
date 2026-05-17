@@ -14,19 +14,18 @@ not print email body content.
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import re
 import subprocess
 import sys
 import time
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 
-from pst_to_pdf.extraction import ensure_readpst_available, extract_pst
+from pst_to_pdf.extraction import ensure_readpst_available, extract_pst, wait_for_stable_eml_tree
+from pst_to_pdf.validator import ValidationSummary, validate_output
 
 
 @dataclass(frozen=True)
@@ -38,28 +37,6 @@ class PstJob:
     manifest: Path
     extract_log: Path
     convert_log: Path
-
-
-@dataclass
-class ValidationSummary:
-    total_eml_files: int = 0
-    total_pdf_files: int = 0
-    total_manifest_rows: int = 0
-    successful_rows: int = 0
-    failed_rows: int = 0
-    timeout_rows: int = 0
-    duplicate_eml_rows: int = 0
-    missing_pdfs_for_successful_rows: int = 0
-
-    def add(self, other: "ValidationSummary") -> None:
-        self.total_eml_files += other.total_eml_files
-        self.total_pdf_files += other.total_pdf_files
-        self.total_manifest_rows += other.total_manifest_rows
-        self.successful_rows += other.successful_rows
-        self.failed_rows += other.failed_rows
-        self.timeout_rows += other.timeout_rows
-        self.duplicate_eml_rows += other.duplicate_eml_rows
-        self.missing_pdfs_for_successful_rows += other.missing_pdfs_for_successful_rows
 
 
 def format_elapsed(seconds: float) -> str:
@@ -88,42 +65,6 @@ def unique_slug(path: Path, used: set[str]) -> str:
     slug = f"{slug}-{digest}"
     used.add(slug)
     return slug
-
-
-def count_files(root: Path, suffix: str) -> int:
-    if not root.exists():
-        return 0
-    return sum(1 for path in root.rglob("*") if path.is_file() and path.suffix.lower() == suffix)
-
-
-def has_eml_files(root: Path) -> bool:
-    return count_files(root, ".eml") > 0
-
-
-def validate_output(eml_dir: Path, pdf_dir: Path, manifest: Path) -> ValidationSummary:
-    rows: list[dict[str, str]] = []
-    if manifest.exists():
-        with manifest.open("r", newline="", encoding="utf-8") as csvfile:
-            rows = list(csv.DictReader(csvfile))
-
-    statuses = Counter(row.get("status", "") for row in rows)
-    eml_counts = Counter(row.get("eml_path", "") for row in rows if row.get("eml_path"))
-    duplicate_eml_rows = sum(count - 1 for count in eml_counts.values() if count > 1)
-    missing_pdfs = sum(
-        1
-        for row in rows
-        if row.get("status") == "ok" and (not row.get("pdf_path") or not Path(row["pdf_path"]).is_file())
-    )
-    return ValidationSummary(
-        total_eml_files=count_files(eml_dir, ".eml"),
-        total_pdf_files=count_files(pdf_dir, ".pdf"),
-        total_manifest_rows=len(rows),
-        successful_rows=statuses.get("ok", 0),
-        failed_rows=statuses.get("error", 0),
-        timeout_rows=statuses.get("timeout", 0),
-        duplicate_eml_rows=duplicate_eml_rows,
-        missing_pdfs_for_successful_rows=missing_pdfs,
-    )
 
 
 def build_jobs(args: argparse.Namespace) -> list[PstJob]:
@@ -177,6 +118,12 @@ def run_conversion(job: PstJob, args: argparse.Namespace) -> float:
         str(args.workers),
         "--timeout-seconds",
         str(args.timeout_seconds),
+        "--eml-stability-seconds",
+        str(args.eml_stability_seconds),
+        "--eml-stability-check-interval",
+        str(args.eml_stability_check_interval),
+        "--eml-stability-max-wait",
+        str(args.eml_stability_max_wait),
     ]
     print(f"[{job.slug}] converting EML to PDF")
     if args.dry_run:
@@ -202,7 +149,10 @@ def print_validation(label: str, summary: ValidationSummary) -> None:
         f"[{label}] validation "
         f"eml={summary.total_eml_files} pdf={summary.total_pdf_files} manifest_rows={summary.total_manifest_rows} "
         f"ok={summary.successful_rows} failed={summary.failed_rows} timeout={summary.timeout_rows} "
-        f"duplicate_eml_rows={summary.duplicate_eml_rows} missing_pdfs={summary.missing_pdfs_for_successful_rows}"
+        f"duplicate_eml_rows={summary.duplicate_eml_rows} missing_pdfs={summary.missing_pdfs_for_successful_rows} "
+        f"eml_files_missing_manifest_rows={summary.eml_files_missing_manifest_rows} "
+        f"manifest_eml_missing_on_disk={summary.manifest_eml_paths_missing_on_disk} "
+        f"extra_pdf_files_not_referenced_by_manifest={summary.extra_pdf_files_not_referenced_by_manifest}"
     )
 
 
@@ -215,6 +165,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-extract", action="store_true", help="Run readpst even when EML files already exist.")
     parser.add_argument("--validate-only", action="store_true", help="Only print validation summaries for discovered PST outputs.")
     parser.add_argument("--dry-run", action="store_true", help="Show planned paths and commands without creating files or running conversion.")
+    parser.add_argument("--eml-stability-seconds", type=int, default=10, help="Seconds the EML tree must stay unchanged before conversion.")
+    parser.add_argument("--eml-stability-check-interval", type=int, default=2, help="Seconds between EML tree stability checks.")
+    parser.add_argument("--eml-stability-max-wait", type=int, default=600, help="Maximum seconds to wait for EML tree stability.")
     return parser.parse_args()
 
 
@@ -226,6 +179,9 @@ def run_case(
     force_extract: bool = False,
     validate_only: bool = False,
     dry_run: bool = False,
+    eml_stability_seconds: int = 10,
+    eml_stability_check_interval: int = 2,
+    eml_stability_max_wait: int = 600,
 ) -> int:
     """Run the standard local PST processing workflow for one case directory."""
     args = argparse.Namespace(
@@ -236,6 +192,9 @@ def run_case(
         force_extract=force_extract,
         validate_only=validate_only,
         dry_run=dry_run,
+        eml_stability_seconds=eml_stability_seconds,
+        eml_stability_check_interval=eml_stability_check_interval,
+        eml_stability_max_wait=eml_stability_max_wait,
     )
     started_at = time.monotonic()
 
@@ -245,6 +204,8 @@ def run_case(
         raise SystemExit("--workers must be >= 1")
     if args.timeout_seconds < 0:
         raise SystemExit("--timeout-seconds must be >= 0")
+    if args.eml_stability_seconds < 0:
+        raise SystemExit("--eml-stability-seconds must be >= 0")
     if not args.validate_only:
         ensure_readpst_available()
 
@@ -277,6 +238,13 @@ def run_case(
             if not args.validate_only:
                 _ran, elapsed = run_extraction(job, args.force_extract, dry_run=False)
                 total_extract += elapsed
+                wait_for_stable_eml_tree(
+                    job.eml_dir,
+                    job.slug,
+                    stable_seconds=args.eml_stability_seconds,
+                    check_interval=args.eml_stability_check_interval,
+                    max_wait_seconds=args.eml_stability_max_wait,
+                )
                 total_convert += run_conversion(job, args)
             summary = validate_output(job.eml_dir, job.pdf_dir, job.manifest)
             total_summary.add(summary)
@@ -292,7 +260,7 @@ def run_case(
         f"timing total={format_elapsed(total_elapsed)} "
         f"extraction={format_elapsed(total_extract)} conversion={format_elapsed(total_convert)}"
     )
-    if total_summary.duplicate_eml_rows or total_summary.missing_pdfs_for_successful_rows:
+    if total_summary.has_consistency_errors():
         return 1
     return 0
 
@@ -307,6 +275,9 @@ def main() -> int:
         force_extract=args.force_extract,
         validate_only=args.validate_only,
         dry_run=args.dry_run,
+        eml_stability_seconds=args.eml_stability_seconds,
+        eml_stability_check_interval=args.eml_stability_check_interval,
+        eml_stability_max_wait=args.eml_stability_max_wait,
     )
 
 

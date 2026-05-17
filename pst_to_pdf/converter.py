@@ -29,6 +29,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable, cast
 
+from pst_to_pdf.extraction import wait_for_stable_eml_tree
+
 
 MANIFEST_FIELDS = [
     "source_pst_path",
@@ -476,6 +478,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["fast", "weasyprint"], default="fast", help="PDF engine. fast uses ReportLab; weasyprint renders constructed HTML.")
     parser.add_argument("--workers", type=int, default=8, help="Number of parallel conversion workers.")
     parser.add_argument("--timeout-seconds", type=int, default=60, help="Per-message timeout. Use 0 to disable.")
+    parser.add_argument("--eml-stability-seconds", type=int, default=10, help="Seconds the EML tree must stay unchanged before task enumeration.")
+    parser.add_argument("--eml-stability-check-interval", type=int, default=2, help="Seconds between EML tree stability checks.")
+    parser.add_argument("--eml-stability-max-wait", type=int, default=600, help="Maximum seconds to wait for EML tree stability.")
     return parser.parse_args()
 
 
@@ -495,6 +500,8 @@ def main() -> int:
         raise SystemExit(f"EML directory not found: {args.eml_dir}")
     if args.workers < 1:
         raise SystemExit("--workers must be >= 1")
+    if args.eml_stability_seconds < 0:
+        raise SystemExit("--eml-stability-seconds must be >= 0")
 
     ensure_safe_outputs(args.pdf_dir, args.manifest, args.force, args.resume)
     args.pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -503,6 +510,14 @@ def main() -> int:
 
     logging.basicConfig(filename=args.log_file, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.info("Starting conversion source=%s eml_dir=%s pdf_dir=%s mode=%s workers=%s", args.source_pst, args.eml_dir, args.pdf_dir, args.mode, args.workers)
+    snapshot = wait_for_stable_eml_tree(
+        args.eml_dir,
+        args.eml_dir.name or "eml",
+        stable_seconds=args.eml_stability_seconds,
+        check_interval=args.eml_stability_check_interval,
+        max_wait_seconds=args.eml_stability_max_wait,
+    )
+    logging.info("EML tree stable count=%s size=%s newest_mtime=%s", snapshot.count, snapshot.total_size, snapshot.newest_mtime)
 
     pst_sha256 = sha256_file(args.source_pst)
     successful_paths, existing_rows, backup = prepare_manifest(args.manifest, args.resume)
