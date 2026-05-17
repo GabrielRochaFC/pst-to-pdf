@@ -517,16 +517,21 @@ def print_conversion_progress(
 ) -> None:
     elapsed_seconds = time.monotonic() - started_at
     rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
+    pct = processed / total * 100.0 if total > 0 else 0.0
+    remaining = total - processed
+    rate_per_sec = processed / elapsed_seconds if elapsed_seconds > 0 else 0.0
+    eta = format_elapsed(remaining / rate_per_sec) if rate_per_sec > 0 and remaining > 0 else "--:--:--"
     print_section(f"[{label}] Conversion progress")
-    print_kv("Processed", f"{format_number(processed)} / {format_number(total)}")
+    print_kv("Progress", f"{format_number(processed)} / {format_number(total)} ({pct:.1f}%)")
     print_kv("Converted", format_number(converted))
     print_kv("Recovered", format_number(recovered))
     print_kv("Skipped", format_number(skipped))
     print_kv("Failed", format_number(failed))
     print_kv("Timeout", format_number(timed_out))
-    print_kv("Remaining", format_number(total - processed))
+    print_kv("Remaining", format_number(remaining))
     print_kv("Elapsed", format_elapsed(elapsed_seconds))
     print_kv("Rate/min", format_number(rate))
+    print_kv("ETA", eta)
 
 
 def main() -> int:

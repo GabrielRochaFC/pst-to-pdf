@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from pst_to_pdf.output import format_number, print_issues, print_kv, print_section
+from pst_to_pdf.output import format_number, green, print_issues, print_kv, print_section, yellow
 
 
 @dataclass
@@ -129,7 +129,10 @@ def print_validation_block(label: str, summary: ValidationSummary) -> None:
     print_kv("Manifest EMLs missing on disk", format_number(summary.manifest_eml_paths_missing_on_disk))
     print_kv("Extra PDFs not in manifest", format_number(summary.extra_pdf_files_not_referenced_by_manifest))
     print()
-    print(f"Status: {'NEEDS ATTENTION' if summary.has_consistency_errors() else 'PASS'}")
+    if summary.has_consistency_errors():
+        print(f"Status: {yellow('NEEDS ATTENTION')}")
+    else:
+        print(f"Status: {green('PASS')}")
     print_issues(validation_issues(summary))
 
 

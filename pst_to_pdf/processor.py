@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 from pst_to_pdf.extraction import ensure_readpst_available, extract_pst, wait_for_stable_eml_tree
-from pst_to_pdf.output import format_number, print_kv, print_section
+from pst_to_pdf.output import format_number, green, print_kv, print_section, yellow
 from pst_to_pdf.validator import ValidationSummary, print_validation_block, validate_output
 
 
@@ -184,7 +184,10 @@ def print_case_summary(case_dir: Path, jobs: list[PstJob], summary: ValidationSu
     print_kv("Extraction time", format_elapsed(total_extract))
     print_kv("Conversion time", format_elapsed(total_convert))
     print()
-    print(f"Status: {'NEEDS ATTENTION' if summary.has_consistency_errors() else 'PASS'}")
+    if summary.has_consistency_errors():
+        print(f"Status: {yellow('NEEDS ATTENTION')}")
+    else:
+        print(f"Status: {green('PASS')}")
     if summary.has_consistency_errors():
         print()
         print("Next suggested action:")

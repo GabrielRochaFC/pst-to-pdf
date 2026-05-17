@@ -2,11 +2,57 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
 
 RULE = "-" * 40
+
+# ANSI codes — only emitted when colors are on
+_RESET = "\033[0m"
+_BOLD_CYAN = "\033[1;36m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_RED = "\033[31m"
+_BOLD = "\033[1m"
+
+_color_override: bool | None = None  # None = auto-detect from TTY + NO_COLOR
+
+
+def set_color(enabled: bool) -> None:
+    """Override automatic TTY / NO_COLOR detection for this process."""
+    global _color_override
+    _color_override = enabled
+
+
+def _colors_on() -> bool:
+    if _color_override is not None:
+        return _color_override
+    if os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def _c(code: str, text: str) -> str:
+    return f"{code}{text}{_RESET}" if _colors_on() else text
+
+
+def green(text: str) -> str:
+    return _c(_GREEN, text)
+
+
+def yellow(text: str) -> str:
+    return _c(_YELLOW, text)
+
+
+def red(text: str) -> str:
+    return _c(_RED, text)
+
+
+def bold(text: str) -> str:
+    return _c(_BOLD, text)
 
 
 def format_number(value: int | float) -> str:
@@ -23,9 +69,25 @@ def format_path(path: str | Path) -> str:
     return str(path)
 
 
+def format_bytes(n: int | float) -> str:
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024.0:
+            return f"{n:,.1f} {unit}"
+        n /= 1024.0
+    return f"{n:,.1f} PB"
+
+
+def format_elapsed(seconds: float) -> str:
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def print_section(title: str) -> None:
     print()
-    print(title)
+    print(_c(_BOLD_CYAN, title))
     print(RULE)
 
 
