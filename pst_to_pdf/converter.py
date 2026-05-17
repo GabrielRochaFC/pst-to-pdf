@@ -87,21 +87,33 @@ class HTMLTextExtractor(HTMLParser):
         "table",
         "tr",
     }
+    SKIP_TAGS = {"style", "script", "head", "title", "noscript"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self._skip_depth: int = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() in self.BLOCK_TAGS:
+        t = tag.lower()
+        if t in self.SKIP_TAGS:
+            self._skip_depth += 1
+        if t in self.BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in self.BLOCK_TAGS:
+        t = tag.lower()
+        if t in self.SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        if t in self.BLOCK_TAGS:
             self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+        if self._skip_depth == 0:
+            self.parts.append(data)
+
+    def handle_comment(self, data: str) -> None:
+        pass
 
     def text(self) -> str:
         raw = "".join(self.parts)

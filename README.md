@@ -120,6 +120,28 @@ Run validation-only mode for a prepared case:
 pst-to-pdf --validate-only
 ```
 
+## PDF Modes
+
+Two PDF engines are supported via the `--mode` flag (default: `fast`).
+
+**fast** (recommended for large batches)
+
+Uses ReportLab. HTML email bodies are converted to plain text before PDF
+generation: `<style>`, `<script>`, `<head>`, `<title>`, `<noscript>`, and
+similar non-visible tags are stripped along with their contents. HTML comments
+are also dropped. The result is a clean, readable text PDF. CSS rules and
+JavaScript are never written into the PDF body.
+
+External resource loading is disabled.
+
+**weasyprint**
+
+Renders a generated HTML template to PDF using WeasyPrint. Preserves more
+visual structure (fonts, spacing, layout) but is slower and may be less
+predictable for very large batches or emails with unusual markup.
+
+External resource loading is also disabled in this mode.
+
 ## Advanced Usage
 
 The installable wizard is the primary workflow. Python wrappers are kept for
