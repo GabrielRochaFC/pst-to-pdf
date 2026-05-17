@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pst-to-pdf"
+version = "0.1.0"
+description = "Local PST to PDF conversion pipeline with an interactive CLI wizard."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "TODO", email = "todo@example.com" },
+]
+license = { text = "MIT" }
+keywords = ["pst", "pdf", "email", "eml", "outlook", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Email",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "weasyprint>=66,<67",
+  "reportlab>=4.2,<5",
+]
+
+[project.urls]
+Homepage = "https://example.com/pst-to-pdf"
+Repository = "https://example.com/pst-to-pdf.git"
+Issues = "https://example.com/pst-to-pdf/issues"
+
+[project.scripts]
+pst-to-pdf = "pst_to_pdf.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pst_to_pdf*"]

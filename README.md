@@ -1,40 +1,134 @@
-# Local PST to PDF Pipeline
+# pst-to-pdf
 
-This project converts Outlook PST email data into readable PDF files on a local Linux machine. PST, EML, PDF, manifest, and log files stay local.
+Local command-line tooling for converting Outlook PST email exports into PDFs.
 
-The scripts do not print email bodies to the terminal and do not use cloud services, online converters, or external APIs.
+## What It Does
 
-## System Dependencies
+`pst-to-pdf` guides you through a local case setup, copies PST files into the
+case `input/` folder, extracts PST messages to EML with `readpst`, converts EML
+files to PDFs, and writes manifests and logs.
 
-Run:
+The tool does not use cloud services, online converters, or external APIs.
+Attachment filenames are listed in the generated PDFs; attachment contents are
+not embedded by default.
 
-```bash
-scripts/check_environment.sh
-```
+## Important Privacy Note
 
-On Ubuntu/Debian, missing system dependencies can be installed with:
+PSTs, EMLs, PDFs, manifests, and logs stay on the local machine. The interactive
+wizard does not inspect or print email contents. Email bodies are parsed only by
+the local conversion step when PDFs are generated.
+
+Existing PSTs, EMLs, PDFs, manifests, logs, and output directories are not
+deleted by the supported workflows.
+
+## System Requirements
+
+- Linux
+- Python 3.10 or newer
+- `pipx` for installing the CLI
+- `readpst` from `pst-utils` for PST extraction
+
+On Ubuntu/Debian, install the required system tools:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip pst-utils pff-tools libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libharfbuzz-subset0
+sudo apt install pipx pst-utils
+pipx ensurepath
 ```
 
-`readpst` from `pst-utils` is the primary extractor. `pffinfo` and `pffexport` from `pff-tools` are fallback tooling only.
-
-## Python Environment
+If you use `zsh`, refresh your shell after `pipx ensurepath`:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
+exec zsh
 ```
 
-## Recommended Multi-PST Workflow
+Opening a new terminal works too.
 
-Use one case directory per person/user. Put all PST files for that person in `input/`:
+Optional/developer tools used by legacy helpers or alternate PDF engines:
+
+```bash
+sudo apt install python3 python3-venv python3-pip pff-tools libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libharfbuzz-subset0
+```
+
+`readpst` is the primary extractor. `pffinfo` and `pffexport` from `pff-tools`
+are fallback inspection/export tools only.
+
+## Installation
+
+Recommended installation after PyPI publication:
+
+```bash
+pipx install pst-to-pdf
+```
+
+`pipx` installs the Python application in an isolated environment and exposes
+the `pst-to-pdf` command globally without activating a project virtual
+environment.
+
+Local development install from this repository:
+
+```bash
+cd /path/to/pst-to-pdf
+pipx install --editable . --force
+```
+
+Test the installed command from anywhere:
+
+```bash
+cd /tmp
+pst-to-pdf --help
+```
+
+Using `python3 -m pip install --user pst-to-pdf` is an advanced fallback, not
+the recommended path. On modern Ubuntu/Debian systems, direct global/user pip
+installs may be blocked by externally managed environment rules. Use `pipx` for
+CLI tools.
+
+## Usage
+
+Run the interactive wizard:
+
+```bash
+pst-to-pdf
+```
+
+The wizard asks for:
+
+- an existing case directory, or a new directory name such as `example-user`;
+- a directory containing `*.pst`, or comma-separated `.pst` file paths;
+- PDF mode, default `fast`;
+- workers, default `8`;
+- timeout seconds, default `60`.
+
+Before processing starts, it shows a summary with the case directory, PST count,
+`input/` destination, mode, workers, timeout, and a reminder that output stays
+local. Extraction and conversion start only after final confirmation.
+
+If a PST with the same name already exists in `input/`, the wizard skips it when
+it appears to be the same file. If a different PST has the same name, it copies
+to a unique numbered filename instead of overwriting existing data.
+
+Preview the planned extraction/conversion commands without running them:
+
+```bash
+pst-to-pdf --dry-run
+```
+
+Run validation-only mode for a prepared case:
+
+```bash
+pst-to-pdf --validate-only
+```
+
+## Advanced Usage
+
+The installable wizard is the primary workflow. Python wrappers are kept for
+automation and compatibility when explicit paths are needed.
+
+Expected case layout:
 
 ```text
-/mnt/hd/pst-pdf-incra/example-user/
+/mnt/hd/pst-pdf/example-user/
 ├── input/
 │   ├── example.user@example.local.001.pst
 │   └── example.user@example.local.002.pst
@@ -42,115 +136,33 @@ Use one case directory per person/user. Put all PST files for that person in `in
 └── logs/
 ```
 
-Create the input directory and copy PSTs:
+Process all PSTs in a prepared case directory:
 
 ```bash
-mkdir -p "/mnt/hd/pst-pdf-incra/example-user/input"
-cp "$HOME/Downloads/"*.pst "/mnt/hd/pst-pdf-incra/example-user/input/"
+python3 scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf/example-user"
 ```
 
-Run everything with the defaults:
+Validate a prepared case without extraction or conversion:
 
 ```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user"
-```
-
-Defaults:
-
-- `--mode fast`
-- `--workers 8`
-- `--timeout-seconds 60`
-- conversion resumes safely by default
-
-The output is created per PST:
-
-```text
-output/<pst-slug>/eml/
-output/<pst-slug>/pdf/
-output/<pst-slug>/manifest/<pst-slug>.csv
-logs/
-```
-
-For `example.user@example.local.001.pst`, the slug is `example-user-001`.
-
-## Resume and Pause
-
-To pause, press `Ctrl+C`. Existing EML, PDF, manifest, and log files are kept.
-
-To resume, run the same command again:
-
-```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user"
-```
-
-The script skips PST extraction when EML files already exist, and it runs conversion with resume behavior.
-
-## Validation
-
-Validate every PST output in the case directory:
-
-```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+python3 scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf/example-user" \
   --validate-only
 ```
 
-Validation reports total EML files, PDF files, manifest rows, successful rows, failed rows, timeout rows, duplicate EML rows, and missing PDFs for successful rows. It does not print email body content.
-
-## Dry Run
-
-Preview the planned directories and commands without creating files or processing PSTs:
+Preview processor commands without extraction or conversion:
 
 ```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
+python3 scripts/process_user_psts.py \
+  --case-dir "/mnt/hd/pst-pdf/example-user" \
   --dry-run
 ```
 
-## Advanced Options
-
-Use fewer workers if the machine becomes overloaded:
+Convert one already-extracted EML tree:
 
 ```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
-  --workers 4
-```
-
-Use WeasyPrint instead of the default fast ReportLab mode:
-
-```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
-  --mode weasyprint
-```
-
-Force re-extraction of PSTs into existing EML directories:
-
-```bash
-.venv/bin/python scripts/process_user_psts.py \
-  --case-dir "/mnt/hd/pst-pdf-incra/example-user" \
-  --force-extract
-```
-
-`--force-extract` does not delete existing files; it lets `readpst` write into the existing directory.
-
-## Lower-Level Commands
-
-The lower-level scripts are still available when you need explicit paths.
-
-Extract one PST:
-
-```bash
-scripts/extract_pst.sh input/sample.pst output/sample/eml
-```
-
-Convert one extracted EML tree:
-
-```bash
-.venv/bin/python scripts/convert_eml_to_pdf.py \
+python3 scripts/convert_eml_to_pdf.py \
   --source-pst input/sample.pst \
   --eml-dir output/sample/eml \
   --pdf-dir output/sample/pdf \
@@ -159,13 +171,63 @@ Convert one extracted EML tree:
   --resume
 ```
 
-Validate one output:
+Validate one output tree:
 
 ```bash
-.venv/bin/python scripts/validate_outputs.py \
+python3 scripts/validate_outputs.py \
   --eml-dir output/sample/eml \
   --pdf-dir output/sample/pdf \
   --manifest output/sample/manifest/sample.csv
 ```
 
-Each PDF includes subject, from, to, cc, bcc, date, message-id, source EML path, attachment filenames, and the email text body. Attachment contents are not embedded.
+The shell scripts in `scripts/` are legacy/developer helpers:
+
+- `scripts/check_environment.sh` checks local command availability.
+- `scripts/extract_pst.sh` extracts a single PST with `readpst`.
+- `scripts/run_test_pipeline.sh` is an older developer helper and is not the
+  recommended workflow for normal use.
+
+They are kept for now because they preserve existing manual workflows, but the
+preferred entry point is `pst-to-pdf`.
+
+## Development
+
+Safe syntax checks:
+
+```bash
+python3 -m py_compile \
+  pst_to_pdf/__init__.py \
+  pst_to_pdf/cli.py \
+  pst_to_pdf/processor.py \
+  pst_to_pdf/converter.py \
+  pst_to_pdf/validator.py \
+  pst_to_pdf/extraction.py \
+  scripts/convert_eml_to_pdf.py \
+  scripts/process_user_psts.py \
+  scripts/validate_outputs.py
+```
+
+Shell syntax checks:
+
+```bash
+bash -n scripts/check_environment.sh scripts/extract_pst.sh scripts/run_test_pipeline.sh
+```
+
+Help checks:
+
+```bash
+pst-to-pdf --help
+python3 -m pst_to_pdf.cli --help
+```
+
+## Publishing Checklist
+
+Before publishing to PyPI:
+
+- replace author and URL placeholders in `pyproject.toml`;
+- confirm the intended license and add a license file;
+- add automated tests for CLI prompts, PST copy collision handling, and dry-run
+  behavior;
+- build source and wheel distributions;
+- run package validation such as `twine check`;
+- publish to TestPyPI first.

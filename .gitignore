@@ -3,6 +3,7 @@
 .agents/
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # Local source data and generated artifacts. Do not commit email data.
 input/

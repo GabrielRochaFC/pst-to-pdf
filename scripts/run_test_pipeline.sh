@@ -6,6 +6,10 @@ usage() {
 Usage:
   scripts/run_test_pipeline.sh [--process] [--force] [--resume] [--mode fast|weasyprint] [--workers N] [--timeout-seconds N]
 
+Legacy/developer helper:
+  - Normal users should run the installed pst-to-pdf command instead.
+  - This script is kept for older manual test workflows.
+
 Default behavior:
   - Runs the environment check only.
 
@@ -72,6 +76,8 @@ if [[ "${process}" -ne 1 ]]; then
   printf '\nEnvironment check complete. Re-run with --process only after approving PST extraction/conversion.\n'
   exit 0
 fi
+
+printf 'Legacy developer helper selected with --process. Prefer pst-to-pdf for normal use.\n'
 
 source_pst="input/teste.pst"
 eml_dir="output/teste/eml"
