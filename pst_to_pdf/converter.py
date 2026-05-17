@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, cast
 
 from pst_to_pdf.extraction import wait_for_stable_eml_tree
-from pst_to_pdf.output import format_number, print_kv, print_section
+from pst_to_pdf.output import finish_dynamic_line, format_number, print_kv, print_section, write_dynamic_line
 
 
 MANIFEST_FIELDS = [
@@ -278,40 +278,45 @@ def reportlab_text(value: str) -> str:
     return html.escape(value or "").replace("\n", "<br/>")
 
 
+def sanitize_header_value(value: str) -> str:
+    """Collapse CR/LF/tab to spaces so long address fields don't break ReportLab."""
+    return re.sub(r"[\r\n\t]+", " ", value or "").strip()
+
+
 def write_fast_pdf(pdf_path: Path, metadata: dict[str, str], body: str) -> None:
-    from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer
 
     styles = getSampleStyleSheet()
     normal = ParagraphStyle("EmailNormal", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12)
     heading = ParagraphStyle("EmailHeading", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=14, leading=18)
-    label = ParagraphStyle("EmailLabel", parent=normal, fontName="Helvetica-Bold")
+    label_style = ParagraphStyle("EmailLabel", parent=normal, fontName="Helvetica-Bold", spaceBefore=4)
 
-    rows = [
-        [Paragraph(reportlab_text(name), label), Paragraph(reportlab_text(metadata.get(name, "")), normal)]
-        for name in HEADER_LABELS
-    ]
-    table = Table(rows, colWidths=[42 * mm, 126 * mm], repeatRows=0)
-    table.setStyle(
-        TableStyle(
-            [
-                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-                ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
+    doc = SimpleDocTemplate(
+        str(pdf_path),
+        pagesize=A4,
+        rightMargin=15 * mm,
+        leftMargin=15 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
     )
+    story: list = [Paragraph("Email PDF Export", heading), Spacer(1, 4 * mm)]
 
-    doc = SimpleDocTemplate(str(pdf_path), pagesize=A4, rightMargin=15 * mm, leftMargin=15 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
-    story = [Paragraph("Email PDF Export", heading), Spacer(1, 5 * mm), table, Spacer(1, 6 * mm)]
+    for name in HEADER_LABELS:
+        raw = sanitize_header_value(metadata.get(name, ""))
+        story.append(Paragraph(html.escape(name) + ":", label_style))
+        story.append(Paragraph(html.escape(raw) if raw else "[none]", normal))
+
+    story.append(Spacer(1, 4 * mm))
+    story.append(HRFlowable(width="100%", thickness=0.5))
+    story.append(Spacer(1, 4 * mm))
+
     for chunk in (body or "[No text body found]").split("\n\n"):
         story.append(Paragraph(reportlab_text(chunk), normal))
         story.append(Spacer(1, 3 * mm))
+
     doc.build(story)
 
 
@@ -504,6 +509,35 @@ def format_elapsed(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _conversion_progress_line(
+    label: str,
+    processed: int,
+    total: int,
+    converted: int,
+    recovered: int,
+    skipped: int,
+    failed: int,
+    timed_out: int,
+    started_at: float,
+) -> str:
+    """Single-line summary for TTY dynamic output."""
+    elapsed_seconds = time.monotonic() - started_at
+    pct = processed / total * 100.0 if total > 0 else 0.0
+    rate_per_sec = processed / elapsed_seconds if elapsed_seconds > 0 else 0.0
+    remaining = total - processed
+    eta = format_elapsed(remaining / rate_per_sec) if rate_per_sec > 0 and remaining > 0 else "--:--:--"
+    ok = converted + recovered
+    return (
+        f"[{label}] {format_number(processed)}/{format_number(total)} ({pct:.1f}%)"
+        f" | ok {format_number(ok)}"
+        f" | skip {format_number(skipped)}"
+        f" | fail {format_number(failed)}"
+        f" | t/o {format_number(timed_out)}"
+        f" | {format_elapsed(elapsed_seconds)}"
+        f" | ETA {eta}"
+    )
+
+
 def print_conversion_progress(
     label: str,
     processed: int,
@@ -515,6 +549,7 @@ def print_conversion_progress(
     timed_out: int,
     started_at: float,
 ) -> None:
+    """Block-style progress for non-TTY output (piped / logged)."""
     elapsed_seconds = time.monotonic() - started_at
     rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
     pct = processed / total * 100.0 if total > 0 else 0.0
@@ -580,11 +615,14 @@ def main() -> int:
     failed = 0
     timed_out = 0
     processed = 0
-    last_progress_reported = 0
+    last_progress_logged = 0   # for log-every-100
+    last_block_reported = 0    # for non-TTY block-every-100
+    last_dynamic_update = 0.0  # for TTY dynamic line (seconds)
 
     manifest_mode = "a" if args.resume and args.manifest.exists() else "w"
     context = mp.get_context("fork")
     running: list[RunningTask] = []
+    is_tty = sys.stdout.isatty()
 
     try:
         with args.manifest.open(manifest_mode, newline="", encoding="utf-8") as csvfile:
@@ -634,15 +672,30 @@ def main() -> int:
                         logging.error("Failed EML path=%s error=%s", row.get("eml_path"), row.get("error"))
 
                 progress_bucket = processed // 100
-                if progress_bucket > last_progress_reported:
-                    last_progress_reported = progress_bucket
-                    elapsed = format_elapsed(time.monotonic() - started_at)
-                    print_conversion_progress(label, processed, total, converted, recovered, skipped, failed, timed_out, started_at)
-                    logging.info("Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s", processed, converted, recovered, skipped, failed, timed_out, total - processed, elapsed)
+                # Always log at 100-message intervals
+                if progress_bucket > last_progress_logged:
+                    last_progress_logged = progress_bucket
+                    logging.info(
+                        "Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s",
+                        processed, converted, recovered, skipped, failed, timed_out,
+                        total - processed, format_elapsed(time.monotonic() - started_at),
+                    )
+
+                now = time.monotonic()
+                if is_tty:
+                    if now - last_dynamic_update >= 1.0:
+                        write_dynamic_line(_conversion_progress_line(label, processed, total, converted, recovered, skipped, failed, timed_out, started_at))
+                        last_dynamic_update = now
+                else:
+                    if progress_bucket > last_block_reported:
+                        last_block_reported = progress_bucket
+                        print_conversion_progress(label, processed, total, converted, recovered, skipped, failed, timed_out, started_at)
 
                 if running and (exhausted or len(running) >= args.workers):
                     time.sleep(0.2)
     except KeyboardInterrupt:
+        if is_tty:
+            finish_dynamic_line()
         for item in running:
             if item.process.is_alive():
                 item.process.terminate()
@@ -655,12 +708,16 @@ def main() -> int:
         logging.warning("Interrupted by user elapsed=%s processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s", elapsed, processed, converted, recovered, skipped, failed, timed_out)
         return 130
 
+    if is_tty:
+        finish_dynamic_line()
+
     final = Counter(row.get("status", "") for row in read_manifest_rows(args.manifest))
     elapsed_seconds = time.monotonic() - started_at
     elapsed = format_elapsed(elapsed_seconds)
     rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
     logging.info("Finished conversion converted=%s recovered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s elapsed=%s rate_per_min=%.2f", converted, recovered, skipped, failed, timed_out, dict(final), existing_rows, elapsed, rate)
-    print_section(f"[{label}] Conversion finished")
+    print_section(f"Conversion finished — {label}")
+    print_kv("Processed", format_number(processed))
     print_kv("Converted", format_number(converted))
     print_kv("Recovered", format_number(recovered))
     print_kv("Skipped", format_number(skipped))

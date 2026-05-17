@@ -108,3 +108,28 @@ def print_issues(issues: list[str]) -> None:
     print("Issues:")
     for issue in issues:
         print(f"- {issue}")
+
+
+# ---------------------------------------------------------------------------
+# Dynamic single-line progress helpers
+# ---------------------------------------------------------------------------
+
+_CLEAR_LINE = "\r\033[K"  # carriage return + erase to end of line
+
+
+def write_dynamic_line(text: str) -> None:
+    """Write a status line that overwrites itself on TTY.
+
+    On non-TTY stdout the text is printed as a normal line so it appears in
+    piped / logged output without ANSI escape codes.
+    """
+    if sys.stdout.isatty():
+        print(f"{_CLEAR_LINE}{text}", end="", flush=True)
+    else:
+        print(text, flush=True)
+
+
+def finish_dynamic_line() -> None:
+    """End the dynamic-line section with a newline (TTY only)."""
+    if sys.stdout.isatty():
+        print(flush=True)

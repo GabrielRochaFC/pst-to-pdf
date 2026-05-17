@@ -14,6 +14,7 @@ from pathlib import Path
 from pst_to_pdf import output
 from pst_to_pdf.output import (
     bold,
+    finish_dynamic_line,
     format_bool,
     format_bytes,
     format_elapsed,
@@ -22,6 +23,7 @@ from pst_to_pdf.output import (
     print_kv,
     print_path_block,
     print_section,
+    write_dynamic_line,
     yellow,
 )
 from pst_to_pdf.processor import run_case
@@ -323,7 +325,6 @@ def _copy_file_with_progress(
     """Chunked copy with inline progress. Returns bytes written."""
     file_size = source.stat().st_size
     written = 0
-    is_tty = sys.stdout.isatty()
     last_print = 0.0
 
     with source.open("rb") as src, destination.open("wb") as dst:
@@ -335,7 +336,7 @@ def _copy_file_with_progress(
             written += len(chunk)
 
             now = time.monotonic()
-            if is_tty or now - last_print >= 3.0:
+            if sys.stdout.isatty() or now - last_print >= 3.0:
                 elapsed = now - started_at
                 total_done = bytes_before + written
                 file_pct = written / file_size * 100 if file_size else 100.0
@@ -348,7 +349,7 @@ def _copy_file_with_progress(
                     else "--:--:--"
                 )
                 name = source.name[:35]
-                line = (
+                write_dynamic_line(
                     f"  [{file_index}/{total_files}] {name:<35}"
                     f"  File: {file_pct:5.1f}%"
                     f"  Total: {format_bytes(total_done)}/{format_bytes(total_bytes)}"
@@ -356,15 +357,10 @@ def _copy_file_with_progress(
                     f"  Elapsed: {format_elapsed(elapsed)}"
                     f"  ETA: {eta}"
                 )
-                if is_tty:
-                    print(f"\r{line}", end="", flush=True)
-                else:
-                    print(line, flush=True)
                 last_print = now
 
     shutil.copystat(source, destination)
-    if is_tty:
-        print()
+    finish_dynamic_line()
     return written
 
 

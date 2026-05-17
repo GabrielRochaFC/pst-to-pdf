@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-from pst_to_pdf.extraction import ensure_readpst_available, extract_pst, wait_for_stable_eml_tree
+from pst_to_pdf.extraction import ExtractionResult, ensure_readpst_available, extract_pst, wait_for_stable_eml_tree
 from pst_to_pdf.output import format_number, green, print_kv, print_section, yellow
 from pst_to_pdf.validator import ValidationSummary, print_validation_block, validate_output
 
@@ -93,7 +93,7 @@ def build_jobs(args: argparse.Namespace) -> list[PstJob]:
     return jobs
 
 
-def run_extraction(job: PstJob, force_extract: bool, dry_run: bool) -> tuple[bool, float]:
+def run_extraction(job: PstJob, force_extract: bool, dry_run: bool) -> ExtractionResult:
     return extract_pst(job.pst_path, job.eml_dir, job.extract_log, job.slug, force_extract, dry_run)
 
 
@@ -277,14 +277,8 @@ def run_case(
         for index, job in enumerate(jobs, start=1):
             print_job_header(index, len(jobs), job)
             if not args.validate_only:
-                print_section("Extraction")
-                print_kv("Status", "running")
-                _ran, elapsed = run_extraction(job, args.force_extract, dry_run=False)
-                total_extract += elapsed
-                print_section("Extraction")
-                print_kv("Status", "completed" if elapsed else "skipped")
-                print_kv("Elapsed", format_elapsed(elapsed))
-                print_kv("Log", job.extract_log)
+                result = run_extraction(job, args.force_extract, dry_run=False)
+                total_extract += result.elapsed
                 print_section("Waiting for stable EML output")
                 snapshot = wait_for_stable_eml_tree(
                     job.eml_dir,

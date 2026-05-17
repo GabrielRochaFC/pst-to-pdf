@@ -3,6 +3,7 @@
 No real PST/EML/PDF files are used. All tests run in-process.
 """
 
+import io
 import os
 import tempfile
 import unittest
@@ -10,11 +11,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pst_to_pdf.output import (
+    finish_dynamic_line,
     format_bytes,
     format_elapsed,
     green,
     red,
     set_color,
+    write_dynamic_line,
     yellow,
 )
 
@@ -125,6 +128,86 @@ class TestCopyFileWithProgress(unittest.TestCase):
 
             self.assertEqual(written, len(data))
             self.assertEqual(dst.read_bytes(), data)
+
+
+class TestDynamicLineHelpers(unittest.TestCase):
+    def test_write_dynamic_line_non_tty_prints_text(self):
+        """On non-TTY stdout, write_dynamic_line prints a normal line."""
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            write_dynamic_line("progress: 50%")
+        self.assertIn("progress: 50%", buf.getvalue())
+
+    def test_write_dynamic_line_non_tty_no_clear_sequence(self):
+        """Non-TTY output must not contain ANSI clear-line escape."""
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            write_dynamic_line("some text")
+        self.assertNotIn("\033[K", buf.getvalue())
+
+    def test_finish_dynamic_line_non_tty_is_noop(self):
+        """finish_dynamic_line must not output anything on non-TTY."""
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            finish_dynamic_line()
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_shorter_line_after_longer_line(self):
+        """Successive write_dynamic_line calls on non-TTY produce separate lines."""
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            write_dynamic_line("a long progress line with lots of text")
+            write_dynamic_line("short")
+        lines = buf.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("short", lines[1])
+
+    def test_extraction_progress_line_does_not_crash(self):
+        """Simulate an extraction progress update without real readpst."""
+        from pst_to_pdf.output import format_bytes, format_elapsed
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            write_dynamic_line(
+                f"[test-slug] Extracting PST"
+                f" | elapsed {format_elapsed(61)}"
+                f" | EML files 1,234"
+                f" | size {format_bytes(512 * 1024 * 1024)}"
+            )
+            finish_dynamic_line()
+        output = buf.getvalue()
+        self.assertIn("test-slug", output)
+        self.assertIn("1,234", output)
+
+
+class TestExtractionProgressWithDummyFiles(unittest.TestCase):
+    def test_eml_tree_snapshot_on_fake_files(self):
+        """eml_tree_snapshot works correctly on a temporary directory with fake .eml files."""
+        from pst_to_pdf.extraction import eml_tree_snapshot
+
+        with tempfile.TemporaryDirectory(prefix="pst_extract_test_") as tmpdir:
+            root = Path(tmpdir)
+            # Create 3 fake .eml files
+            for i in range(3):
+                f = root / f"msg{i}.eml"
+                f.write_bytes(b"fake eml content " * 100)
+
+            # Create a non-.eml file that should be ignored
+            (root / "readme.txt").write_text("ignore me")
+
+            snapshot = eml_tree_snapshot(root)
+
+        self.assertEqual(snapshot.count, 3)
+        self.assertGreater(snapshot.total_size, 0)
+        self.assertGreater(snapshot.newest_mtime, 0)
+
+    def test_eml_tree_snapshot_empty_dir(self):
+        from pst_to_pdf.extraction import eml_tree_snapshot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot = eml_tree_snapshot(Path(tmpdir))
+
+        self.assertEqual(snapshot.count, 0)
+        self.assertEqual(snapshot.total_size, 0)
 
 
 if __name__ == "__main__":

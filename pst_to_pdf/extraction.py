@@ -8,14 +8,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from pst_to_pdf.output import format_number, print_kv
-
-
-def format_elapsed(seconds: float) -> str:
-    total = int(seconds)
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+from pst_to_pdf.output import (
+    finish_dynamic_line,
+    format_bytes,
+    format_elapsed,
+    format_number,
+    print_kv,
+    print_section,
+    write_dynamic_line,
+)
 
 
 def count_files(root: Path, suffix: str) -> int:
@@ -112,10 +113,32 @@ def ensure_readpst_available() -> None:
         raise SystemExit("Missing readpst. Install it with: sudo apt install -y pst-utils")
 
 
-def extract_pst(source_pst: Path, eml_dir: Path, extract_log: Path, label: str, force_extract: bool, dry_run: bool) -> tuple[bool, float]:
+@dataclass(frozen=True)
+class ExtractionResult:
+    ran: bool
+    elapsed: float
+    eml_count: int
+    eml_size: int
+
+
+_POLL_INTERVAL = 2.0  # seconds between progress updates during extraction
+
+
+def extract_pst(
+    source_pst: Path,
+    eml_dir: Path,
+    extract_log: Path,
+    label: str,
+    force_extract: bool,
+    dry_run: bool,
+) -> ExtractionResult:
     if has_eml_files(eml_dir) and not force_extract:
-        print(f"[{label}] extraction skipped: existing EML files found")
-        return False, 0.0
+        snapshot = eml_tree_snapshot(eml_dir)
+        print(
+            f"[{label}] Extraction skipped — EML files already exist"
+            f" ({format_number(snapshot.count)} files, {format_bytes(snapshot.total_size)})"
+        )
+        return ExtractionResult(ran=False, elapsed=0.0, eml_count=snapshot.count, eml_size=snapshot.total_size)
 
     command = ["readpst", "-e", "-D", "-o", str(eml_dir), str(source_pst)]
     print_kv("Source PST", source_pst)
@@ -123,19 +146,38 @@ def extract_pst(source_pst: Path, eml_dir: Path, extract_log: Path, label: str, 
     if dry_run:
         print_kv("Status", "planned")
         print_kv("Command", " ".join(command))
-        return False, 0.0
+        return ExtractionResult(ran=False, elapsed=0.0, eml_count=0, eml_size=0)
 
     eml_dir.mkdir(parents=True, exist_ok=True)
     extract_log.parent.mkdir(parents=True, exist_ok=True)
     started_at = time.monotonic()
+
     with extract_log.open("w", encoding="utf-8") as logfile:
         logfile.write(f"Source PST: {source_pst}\nOutput EML dir: {eml_dir}\n")
         logfile.flush()
-        result = subprocess.run(command, stdout=logfile, stderr=subprocess.STDOUT, check=False)
+        proc = subprocess.Popen(command, stdout=logfile, stderr=subprocess.STDOUT)
+        while proc.poll() is None:
+            elapsed = time.monotonic() - started_at
+            snapshot = eml_tree_snapshot(eml_dir)
+            write_dynamic_line(
+                f"[{label}] Extracting PST"
+                f" | elapsed {format_elapsed(elapsed)}"
+                f" | EML files {format_number(snapshot.count)}"
+                f" | size {format_bytes(snapshot.total_size)}"
+            )
+            time.sleep(_POLL_INTERVAL)
+
+    finish_dynamic_line()
     elapsed = time.monotonic() - started_at
-    if result.returncode != 0:
+
+    if proc.returncode != 0:
         raise RuntimeError(f"readpst failed for {source_pst}; see {extract_log}")
-    print_kv("Status", "completed")
+
+    final = eml_tree_snapshot(eml_dir)
+    print_section(f"Extraction completed — {label}")
+    print_kv("EML files", format_number(final.count))
+    print_kv("Size", format_bytes(final.total_size))
     print_kv("Elapsed", format_elapsed(elapsed))
     print_kv("Log", extract_log)
-    return True, elapsed
+
+    return ExtractionResult(ran=True, elapsed=elapsed, eml_count=final.count, eml_size=final.total_size)
