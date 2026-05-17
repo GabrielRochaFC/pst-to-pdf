@@ -8,6 +8,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from pst_to_pdf.output import format_number, print_kv
+
 
 def format_elapsed(seconds: float) -> str:
     total = int(seconds)
@@ -70,11 +72,12 @@ def wait_for_stable_eml_tree(
         raise SystemExit("--eml-stability-max-wait must be >= --eml-stability-seconds")
 
     initial = eml_tree_snapshot(root)
-    print(
-        f"[{label}] waiting for stable EML tree path={root} "
-        f"stable_seconds={stable_seconds} check_interval={check_interval} max_wait={max_wait_seconds} "
-        f"count={initial.count} size={initial.total_size}"
-    )
+    print_kv("Path", root)
+    print_kv("Stable period", f"{format_number(stable_seconds)} seconds")
+    print_kv("Check interval", f"{format_number(check_interval)} seconds")
+    print_kv("Maximum wait", f"{format_number(max_wait_seconds)} seconds")
+    print_kv("Initial EML count", format_number(initial.count))
+    print_kv("Initial total size", f"{format_number(initial.total_size)} bytes")
     if dry_run:
         return initial
 
@@ -87,14 +90,14 @@ def wait_for_stable_eml_tree(
         changed = current != previous
         now = time.monotonic()
         if changed:
-            print(f"[{label}] EML tree changed count={current.count} size={current.total_size}")
+            print(f"[{label}] EML tree changed: count={format_number(current.count)} size={format_number(current.total_size)} bytes")
             previous = current
             stable_since = now
         elif now - stable_since >= stable_seconds:
-            print(
-                f"[{label}] EML tree stable count={current.count} size={current.total_size} "
-                f"newest_mtime={current.newest_mtime:.6f} waited={format_elapsed(now - started_at)}"
-            )
+            print_kv("Final EML count", format_number(current.count))
+            print_kv("Final total size", f"{format_number(current.total_size)} bytes")
+            print_kv("Newest EML mtime", f"{current.newest_mtime:.6f}")
+            print_kv("Waited", format_elapsed(now - started_at))
             return current
 
         if now - started_at >= max_wait_seconds:
@@ -115,9 +118,11 @@ def extract_pst(source_pst: Path, eml_dir: Path, extract_log: Path, label: str, 
         return False, 0.0
 
     command = ["readpst", "-e", "-D", "-o", str(eml_dir), str(source_pst)]
-    print(f"[{label}] extracting PST to {eml_dir}")
+    print_kv("Source PST", source_pst)
+    print_kv("EML dir", eml_dir)
     if dry_run:
-        print(f"[{label}] dry-run extract command: {' '.join(command)}")
+        print_kv("Status", "planned")
+        print_kv("Command", " ".join(command))
         return False, 0.0
 
     eml_dir.mkdir(parents=True, exist_ok=True)
@@ -130,5 +135,7 @@ def extract_pst(source_pst: Path, eml_dir: Path, extract_log: Path, label: str, 
     elapsed = time.monotonic() - started_at
     if result.returncode != 0:
         raise RuntimeError(f"readpst failed for {source_pst}; see {extract_log}")
-    print(f"[{label}] extraction finished elapsed={format_elapsed(elapsed)} log={extract_log}")
+    print_kv("Status", "completed")
+    print_kv("Elapsed", format_elapsed(elapsed))
+    print_kv("Log", extract_log)
     return True, elapsed

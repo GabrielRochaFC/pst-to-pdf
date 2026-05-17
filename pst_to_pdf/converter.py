@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, cast
 
 from pst_to_pdf.extraction import wait_for_stable_eml_tree
+from pst_to_pdf.output import format_number, print_kv, print_section
 
 
 MANIFEST_FIELDS = [
@@ -491,6 +492,31 @@ def format_elapsed(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def print_conversion_progress(
+    label: str,
+    processed: int,
+    total: int,
+    converted: int,
+    recovered: int,
+    skipped: int,
+    failed: int,
+    timed_out: int,
+    started_at: float,
+) -> None:
+    elapsed_seconds = time.monotonic() - started_at
+    rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
+    print_section(f"[{label}] Conversion progress")
+    print_kv("Processed", f"{format_number(processed)} / {format_number(total)}")
+    print_kv("Converted", format_number(converted))
+    print_kv("Recovered", format_number(recovered))
+    print_kv("Skipped", format_number(skipped))
+    print_kv("Failed", format_number(failed))
+    print_kv("Timeout", format_number(timed_out))
+    print_kv("Remaining", format_number(total - processed))
+    print_kv("Elapsed", format_elapsed(elapsed_seconds))
+    print_kv("Rate/min", format_number(rate))
+
+
 def main() -> int:
     started_at = time.monotonic()
     args = parse_args()
@@ -510,9 +536,11 @@ def main() -> int:
 
     logging.basicConfig(filename=args.log_file, level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.info("Starting conversion source=%s eml_dir=%s pdf_dir=%s mode=%s workers=%s", args.source_pst, args.eml_dir, args.pdf_dir, args.mode, args.workers)
+    label = args.manifest.stem
+    print_section("Waiting for stable EML output")
     snapshot = wait_for_stable_eml_tree(
         args.eml_dir,
-        args.eml_dir.name or "eml",
+        label,
         stable_seconds=args.eml_stability_seconds,
         check_interval=args.eml_stability_check_interval,
         max_wait_seconds=args.eml_stability_max_wait,
@@ -591,13 +619,9 @@ def main() -> int:
                 progress_bucket = processed // 100
                 if progress_bucket > last_progress_reported:
                     last_progress_reported = progress_bucket
-                    remaining = total - processed
                     elapsed = format_elapsed(time.monotonic() - started_at)
-                    print(
-                        f"progress processed={processed} converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} remaining={remaining} elapsed={elapsed}",
-                        flush=True,
-                    )
-                    logging.info("Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s", processed, converted, recovered, skipped, failed, timed_out, remaining, elapsed)
+                    print_conversion_progress(label, processed, total, converted, recovered, skipped, failed, timed_out, started_at)
+                    logging.info("Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s", processed, converted, recovered, skipped, failed, timed_out, total - processed, elapsed)
 
                 if running and (exhausted or len(running) >= args.workers):
                     time.sleep(0.2)
@@ -619,7 +643,15 @@ def main() -> int:
     elapsed = format_elapsed(elapsed_seconds)
     rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
     logging.info("Finished conversion converted=%s recovered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s elapsed=%s rate_per_min=%.2f", converted, recovered, skipped, failed, timed_out, dict(final), existing_rows, elapsed, rate)
-    print(f"Conversion finished. converted={converted} recovered={recovered} skipped={skipped} failed={failed} timeout={timed_out} elapsed={elapsed} rate_per_min={rate:.2f} manifest={args.manifest}")
+    print_section(f"[{label}] Conversion finished")
+    print_kv("Converted", format_number(converted))
+    print_kv("Recovered", format_number(recovered))
+    print_kv("Skipped", format_number(skipped))
+    print_kv("Failed", format_number(failed))
+    print_kv("Timeout", format_number(timed_out))
+    print_kv("Elapsed", elapsed)
+    print_kv("Rate/min", format_number(rate))
+    print_kv("Manifest", args.manifest)
     return 0 if failed == 0 and timed_out == 0 else 1
 
 

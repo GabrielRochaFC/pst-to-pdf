@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pst_to_pdf.converter import MANIFEST_FIELDS
+from pst_to_pdf.output import format_number, print_kv, print_section
 from pst_to_pdf.validator import ValidationSummary, paths_with_suffix, read_manifest_rows, validate_output
 
 
@@ -164,23 +165,44 @@ def repair_slug(case_dir: Path, slug: str, apply: bool) -> RepairResult:
 
 
 def print_result(result: RepairResult) -> None:
-    mode = "APPLIED" if result.applied else "DRY-RUN"
-    print(f"[{result.slug}] manifest_repair {mode}")
-    print(f"[{result.slug}] manifest={result.manifest}")
-    if result.backup:
-        print(f"[{result.slug}] backup={result.backup}")
-    print(
-        f"[{result.slug}] before rows={result.before_rows} duplicate_eml_rows={result.before.duplicate_eml_rows} "
-        f"eml_missing_manifest={result.before.eml_files_missing_manifest_rows} "
-        f"extra_pdfs={result.before.extra_pdf_files_not_referenced_by_manifest}"
-    )
-    print(
-        f"[{result.slug}] after rows={result.after_rows} duplicate_eml_rows={result.after.duplicate_eml_rows} "
-        f"eml_missing_manifest={result.after.eml_files_missing_manifest_rows} "
-        f"extra_pdfs={result.after.extra_pdf_files_not_referenced_by_manifest}"
-    )
-    print(f"[{result.slug}] duplicate_extra_rows_removed={result.duplicate_extra_rows_removed}")
-    print(f"[{result.slug}] eml_files_without_ok_manifest_rows={result.eml_files_without_ok_manifest_rows}")
+    if result.applied:
+        print_section(f"Manifest Repair Applied - {result.slug}")
+        if result.backup:
+            print("Backup created:")
+            print(f"  {result.backup}")
+            print()
+        print_kv("Rows before", format_number(result.before_rows))
+        print_kv("Rows after", format_number(result.after_rows))
+        print()
+        print("No EML or PDF files were deleted.")
+        return
+
+    print_section(f"Manifest Repair Preview - {result.slug}")
+    print_kv("Mode", "DRY RUN")
+    print_kv("Manifest", result.manifest)
+    print()
+    print("Before")
+    print_kv("Rows", format_number(result.before_rows))
+    print_kv("Duplicate EML rows", format_number(result.before.duplicate_eml_rows))
+    print_kv("EMLs missing manifest", format_number(result.before.eml_files_missing_manifest_rows))
+    print_kv("Extra PDFs", format_number(result.before.extra_pdf_files_not_referenced_by_manifest))
+    print()
+    print("After")
+    print_kv("Rows", format_number(result.after_rows))
+    print_kv("Duplicate EML rows", format_number(result.after.duplicate_eml_rows))
+    print_kv("EMLs missing manifest", format_number(result.after.eml_files_missing_manifest_rows))
+    print_kv("Extra PDFs", format_number(result.after.extra_pdf_files_not_referenced_by_manifest))
+    print()
+    print("Changes that would be made:")
+    print(f"- {format_number(result.duplicate_extra_rows_removed)} duplicate manifest rows would be removed.")
+    print("- No EML files would be deleted.")
+    print("- No PDF files would be deleted.")
+    print("- A backup would be created only when using --apply.")
+    print()
+    print_kv("EMLs still needing conversion", format_number(result.eml_files_without_ok_manifest_rows))
+    print()
+    print("Next step:")
+    print("Review this output. If correct, run the same command with --apply.")
 
 
 def parse_args() -> argparse.Namespace:

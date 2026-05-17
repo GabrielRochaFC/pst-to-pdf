@@ -9,6 +9,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from pst_to_pdf.output import format_bool, format_number, print_kv, print_path_block, print_section
 from pst_to_pdf.processor import run_case
 
 
@@ -34,10 +35,11 @@ def prompt_text(message: str, default: str | None = None) -> str:
     return ""
 
 
-def prompt_choice(message: str, choices: dict[str, str], default: str) -> str:
+def prompt_choice(message: str, choices: dict[str, str], default: str, compact: bool = True) -> str:
     labels = "/".join(f"{key}" + ("*" if key == default else "") for key in choices)
     while True:
-        value = input(f"{message} ({labels}): ").strip().lower() or default
+        prompt = f"{message} ({labels}): " if compact else f"{message} [{default}]: "
+        value = input(prompt).strip().lower() or default
         if value in choices:
             return value
         print(f"Choose one of: {', '.join(choices)}")
@@ -78,20 +80,22 @@ def resolve_user_path(value: str, base: Path | None = None) -> Path:
 
 
 def choose_case_dir() -> Path:
-    mode = prompt_choice(
-        "Use an existing case directory or create a new one in the current directory?",
-        {"e": "existing", "n": "new"},
-        "n",
-    )
+    print_section("Step 1/5 - Case directory")
+    print("Choose where this user's processing folder will be stored.")
+    print()
+    print("[e] Use an existing case directory")
+    print("[n] Create a new case directory here")
+    print()
+    mode = prompt_choice("Selection", {"e": "existing", "n": "new"}, "n", compact=False)
     if mode == "e":
         while True:
-            case_dir = resolve_user_path(prompt_text("Existing case directory"))
+            case_dir = resolve_user_path(prompt_text("Existing case directory path"))
             if case_dir.is_dir():
                 return case_dir
             print(f"Directory not found: {case_dir}")
 
     while True:
-        name = prompt_text("New case directory name")
+        name = prompt_text("New case directory name, for example example-user")
         if not name or Path(name).is_absolute() or any(part == ".." for part in Path(name).parts):
             print("Enter a relative directory name, for example: example-user")
             continue
@@ -121,8 +125,13 @@ def discover_psts(raw: str) -> list[Path]:
 
 
 def prompt_psts() -> list[Path]:
+    print_section("Step 2/5 - PST source")
+    print("Enter either:")
+    print("- a folder containing .pst files")
+    print("- or comma-separated .pst file paths")
+    print()
     while True:
-        raw = prompt_text("PST source directory, or comma-separated .pst files")
+        raw = prompt_text("PST source")
         psts = discover_psts(raw)
         missing = [path for path in psts if not path.is_file()]
         wrong_suffix = [path for path in psts if path.suffix.lower() != ".pst"]
@@ -190,9 +199,9 @@ def copy_psts(psts: list[Path], input_dir: Path) -> list[CopiedPst]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Interactive wizard for the local PST-to-PDF pipeline.")
-    parser.add_argument("--dry-run", action="store_true", help="Copy PSTs, then show planned pipeline commands without extraction or conversion.")
-    parser.add_argument("--validate-only", action="store_true", help="Run validation only after preparing the case directory.")
+    parser = argparse.ArgumentParser(description="Interactive local PST to PDF conversion wizard.")
+    parser.add_argument("--dry-run", action="store_true", help="Prepare/copy PSTs and show planned commands without extraction or conversion.")
+    parser.add_argument("--validate-only", action="store_true", help="Run validation after preparing the case directory; do not extract or convert.")
     parser.add_argument("--force-extract", action="store_true", help="Run readpst even when EML files already exist.")
     return parser.parse_args()
 
@@ -200,28 +209,56 @@ def parse_args() -> argparse.Namespace:
 def print_summary(case_dir: Path, copied: list[CopiedPst], mode: str, workers: int, timeout_seconds: int, dry_run: bool, validate_only: bool) -> None:
     copied_count = sum(1 for item in copied if item.copied)
     skipped_count = len(copied) - copied_count
+    print_section("Processing Summary")
+    print_kv("Case directory", case_dir)
+    print_kv("PST files", format_number(len(copied)))
+    print_kv("Input folder", case_dir / "input")
+    print_kv("Copied PSTs", format_number(copied_count))
+    print_kv("Skipped PSTs", format_number(skipped_count))
+    print_kv("PDF mode", mode)
+    print_kv("Workers", format_number(workers))
+    print_kv("Timeout", f"{format_number(timeout_seconds)} seconds")
+    print_kv("Dry run", format_bool(dry_run))
+    print_kv("Validation only", format_bool(validate_only))
+    print_path_block("Output will be written under", case_dir / "output")
+    print_path_block("Logs will be written under", case_dir / "logs")
     print()
-    print("Summary")
-    print(f"  case directory: {case_dir}")
-    print(f"  PSTs found: {len(copied)}")
-    print(f"  input destination: {case_dir / 'input'}")
-    print(f"  copied: {copied_count} skipped existing: {skipped_count}")
-    print(f"  mode: {mode}")
-    print(f"  workers: {workers}")
-    print(f"  timeout_seconds: {timeout_seconds}")
-    if dry_run:
-        print("  dry-run: yes")
-    if validate_only:
-        print("  validate-only: yes")
-    print("  EML, PDF, manifest, and log files stay local in this case directory.")
-    print()
+    print("No email body content will be printed.")
 
 
 def print_interrupted(copy_step_started: bool) -> None:
     print()
-    print("Interrupted. No processing was started.")
+    print("Interrupted by user.")
     if copy_step_started:
-        print("Any PST files copied into the case input folder remain in place.")
+        print("No extraction or conversion was started.")
+        print("Any PST files already copied into the case input folder were left in place.")
+    else:
+        print("No processing was started.")
+
+
+def print_intro(dry_run: bool) -> None:
+    print()
+    print("PST to PDF - Local Conversion Wizard")
+    print("=" * 38)
+    print()
+    print("This tool will:")
+    print("1. Create or use a case directory.")
+    print("2. Copy PST files into the case input folder.")
+    print("3. Extract PST messages into local EML files.")
+    print("4. Convert EML messages into local PDF files.")
+    print("5. Generate manifests and logs.")
+    print()
+    print("Privacy:")
+    print("- Files stay local.")
+    print("- Email bodies are not printed to the terminal.")
+    print("- Original PST files are not modified.")
+    if dry_run:
+        print()
+        print("DRY RUN MODE")
+        print("No PST extraction will be run.")
+        print("No EML to PDF conversion will be run.")
+        print("No email contents will be read for conversion.")
+        print("The tool may prepare/copy PST files into the case input folder.")
 
 
 def main() -> int:
@@ -235,23 +272,26 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, handle_sigint)
     try:
-        print("Local PST to PDF setup")
+        print_intro(args.dry_run)
         case_dir = choose_case_dir()
         psts = prompt_psts()
         copy_step_started = True
         copied = copy_psts(psts, case_dir / "input")
 
-        mode = prompt_choice("PDF mode", {"fast": "fast", "weasyprint": "weasyprint"}, DEFAULT_MODE)
+        print_section("Step 3/5 - Conversion settings")
+        mode = prompt_choice("PDF mode", {"fast": "fast", "weasyprint": "weasyprint"}, DEFAULT_MODE, compact=False)
         workers = prompt_int("Workers", DEFAULT_WORKERS, minimum=1)
-        timeout_seconds = prompt_int("Timeout seconds per email, 0 disables timeout", DEFAULT_TIMEOUT_SECONDS, minimum=0)
+        timeout_seconds = prompt_int("Timeout per email in seconds", DEFAULT_TIMEOUT_SECONDS, minimum=0)
 
+        print_section("Step 4/5 - Review")
         print_summary(case_dir, copied, mode, workers, timeout_seconds, args.dry_run, args.validate_only)
-        if not prompt_bool("Start processing now?", default=False):
+        if not prompt_bool("Start processing?", default=False):
             print("Processing not started. PST copies remain in input/.")
             return 0
 
+        print_section("Step 5/5 - Processing")
         signal.signal(signal.SIGINT, previous_sigint_handler)
-        return int(
+        result = int(
             run_case(
                 case_dir=case_dir,
                 mode=mode,
@@ -262,6 +302,13 @@ def main() -> int:
                 dry_run=args.dry_run,
             )
         )
+        if args.dry_run:
+            print()
+            print("Dry run completed.")
+            print("Review the summary above. To process for real, run:")
+            print()
+            print("pst-to-pdf")
+        return result
     except KeyboardInterrupt:
         print_interrupted(copy_step_started)
         return 130

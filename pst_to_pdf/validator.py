@@ -9,6 +9,8 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from pst_to_pdf.output import format_number, print_issues, print_kv, print_section
+
 
 @dataclass
 class ValidationSummary:
@@ -97,17 +99,38 @@ def validate_output(eml_dir: Path, pdf_dir: Path, manifest: Path) -> ValidationS
 
 
 def print_summary(summary: ValidationSummary) -> None:
-    print(f"total_eml_files={summary.total_eml_files}")
-    print(f"total_pdf_files={summary.total_pdf_files}")
-    print(f"total_manifest_rows={summary.total_manifest_rows}")
-    print(f"successful_rows={summary.successful_rows}")
-    print(f"failed_rows={summary.failed_rows}")
-    print(f"timeout_rows={summary.timeout_rows}")
-    print(f"duplicate_eml_rows={summary.duplicate_eml_rows}")
-    print(f"missing_pdfs_for_successful_rows={summary.missing_pdfs_for_successful_rows}")
-    print(f"eml_files_missing_manifest_rows={summary.eml_files_missing_manifest_rows}")
-    print(f"manifest_eml_paths_missing_on_disk={summary.manifest_eml_paths_missing_on_disk}")
-    print(f"extra_pdf_files_not_referenced_by_manifest={summary.extra_pdf_files_not_referenced_by_manifest}")
+    print_validation_block("Output", summary)
+
+
+def validation_issues(summary: ValidationSummary) -> list[str]:
+    issues: list[str] = []
+    if summary.duplicate_eml_rows:
+        issues.append(f"{format_number(summary.duplicate_eml_rows)} duplicate EML rows found.")
+    if summary.missing_pdfs_for_successful_rows:
+        issues.append(f"{format_number(summary.missing_pdfs_for_successful_rows)} successful manifest rows are missing PDFs.")
+    if summary.eml_files_missing_manifest_rows:
+        issues.append(f"{format_number(summary.eml_files_missing_manifest_rows)} EML files are missing manifest rows.")
+    if summary.manifest_eml_paths_missing_on_disk:
+        issues.append(f"{format_number(summary.manifest_eml_paths_missing_on_disk)} manifest EML paths are missing on disk.")
+    return issues
+
+
+def print_validation_block(label: str, summary: ValidationSummary) -> None:
+    print_section(f"Validation - {label}")
+    print_kv("EML files", format_number(summary.total_eml_files))
+    print_kv("PDF files", format_number(summary.total_pdf_files))
+    print_kv("Manifest rows", format_number(summary.total_manifest_rows))
+    print_kv("Successful rows", format_number(summary.successful_rows))
+    print_kv("Failed rows", format_number(summary.failed_rows))
+    print_kv("Timeout rows", format_number(summary.timeout_rows))
+    print_kv("Duplicate EML rows", format_number(summary.duplicate_eml_rows))
+    print_kv("Missing PDFs for OK rows", format_number(summary.missing_pdfs_for_successful_rows))
+    print_kv("EMLs missing manifest rows", format_number(summary.eml_files_missing_manifest_rows))
+    print_kv("Manifest EMLs missing on disk", format_number(summary.manifest_eml_paths_missing_on_disk))
+    print_kv("Extra PDFs not in manifest", format_number(summary.extra_pdf_files_not_referenced_by_manifest))
+    print()
+    print(f"Status: {'NEEDS ATTENTION' if summary.has_consistency_errors() else 'PASS'}")
+    print_issues(validation_issues(summary))
 
 
 def parse_args() -> argparse.Namespace:

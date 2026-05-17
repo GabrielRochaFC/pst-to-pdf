@@ -25,7 +25,8 @@ from pathlib import Path
 
 
 from pst_to_pdf.extraction import ensure_readpst_available, extract_pst, wait_for_stable_eml_tree
-from pst_to_pdf.validator import ValidationSummary, validate_output
+from pst_to_pdf.output import format_number, print_kv, print_section
+from pst_to_pdf.validator import ValidationSummary, print_validation_block, validate_output
 
 
 @dataclass(frozen=True)
@@ -125,9 +126,10 @@ def run_conversion(job: PstJob, args: argparse.Namespace) -> float:
         "--eml-stability-max-wait",
         str(args.eml_stability_max_wait),
     ]
-    print(f"[{job.slug}] converting EML to PDF")
+    print_section("Conversion")
+    print_kv("Status", "planned" if args.dry_run else "running")
     if args.dry_run:
-        print(f"[{job.slug}] dry-run convert command: {' '.join(command)}")
+        print_kv("Command", " ".join(command))
         return 0.0
 
     job.pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -140,20 +142,53 @@ def run_conversion(job: PstJob, args: argparse.Namespace) -> float:
         raise KeyboardInterrupt
     if result.returncode not in {0, 1}:
         raise RuntimeError(f"conversion command failed for {job.pst_path}; see {job.convert_log}")
-    print(f"[{job.slug}] conversion finished elapsed={format_elapsed(elapsed)} log={job.convert_log}")
+    print_section("Conversion")
+    print_kv("Status", "completed")
+    print_kv("Elapsed", format_elapsed(elapsed))
+    print_kv("Log", job.convert_log)
     return elapsed
 
 
 def print_validation(label: str, summary: ValidationSummary) -> None:
-    print(
-        f"[{label}] validation "
-        f"eml={summary.total_eml_files} pdf={summary.total_pdf_files} manifest_rows={summary.total_manifest_rows} "
-        f"ok={summary.successful_rows} failed={summary.failed_rows} timeout={summary.timeout_rows} "
-        f"duplicate_eml_rows={summary.duplicate_eml_rows} missing_pdfs={summary.missing_pdfs_for_successful_rows} "
-        f"eml_files_missing_manifest_rows={summary.eml_files_missing_manifest_rows} "
-        f"manifest_eml_missing_on_disk={summary.manifest_eml_paths_missing_on_disk} "
-        f"extra_pdf_files_not_referenced_by_manifest={summary.extra_pdf_files_not_referenced_by_manifest}"
-    )
+    print_validation_block(label, summary)
+
+
+def print_job_header(index: int, total: int, job: PstJob) -> None:
+    print_section(f"PST {index}/{total} - {job.slug}")
+    print_kv("Source PST", job.pst_path)
+    print_kv("Output dir", job.eml_dir.parent)
+    print_kv("EML dir", job.eml_dir)
+    print_kv("PDF dir", job.pdf_dir)
+    print_kv("Manifest", job.manifest)
+
+
+def print_case_summary(case_dir: Path, jobs: list[PstJob], summary: ValidationSummary, total_elapsed: float, total_extract: float, total_convert: float) -> None:
+    print_section("Case Summary")
+    print_kv("Case directory", case_dir)
+    print_kv("PST files", format_number(len(jobs)))
+    print_kv("Total EMLs", format_number(summary.total_eml_files))
+    print_kv("Total PDFs", format_number(summary.total_pdf_files))
+    print_kv("Manifest rows", format_number(summary.total_manifest_rows))
+    print_kv("Successful", format_number(summary.successful_rows))
+    print_kv("Failed", format_number(summary.failed_rows))
+    print_kv("Timeout", format_number(summary.timeout_rows))
+    print()
+    print("Consistency")
+    print_kv("Duplicate EML rows", format_number(summary.duplicate_eml_rows))
+    print_kv("Missing PDFs for OK rows", format_number(summary.missing_pdfs_for_successful_rows))
+    print_kv("EMLs missing manifest rows", format_number(summary.eml_files_missing_manifest_rows))
+    print_kv("Manifest EMLs missing on disk", format_number(summary.manifest_eml_paths_missing_on_disk))
+    print_kv("Extra PDFs not in manifest", format_number(summary.extra_pdf_files_not_referenced_by_manifest))
+    print()
+    print_kv("Total elapsed", format_elapsed(total_elapsed))
+    print_kv("Extraction time", format_elapsed(total_extract))
+    print_kv("Conversion time", format_elapsed(total_convert))
+    print()
+    print(f"Status: {'NEEDS ATTENTION' if summary.has_consistency_errors() else 'PASS'}")
+    if summary.has_consistency_errors():
+        print()
+        print("Next suggested action:")
+        print("Run manifest repair dry-run before processing more users.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -217,14 +252,16 @@ def run_case(
     if not jobs:
         raise SystemExit(f"No .pst files found in {input_dir}")
 
-    print(f"case_dir={args.case_dir}")
-    print(f"psts_found={len(jobs)} mode={args.mode} workers={args.workers} timeout_seconds={args.timeout_seconds}")
-    for job in jobs:
-        print(f"[{job.slug}] pst={job.pst_path}")
-        print(f"[{job.slug}] output={job.eml_dir.parent}")
+    print_section("Case Plan")
+    print_kv("Case directory", args.case_dir)
+    print_kv("PST files found", format_number(len(jobs)))
+    print_kv("PDF mode", args.mode)
+    print_kv("Workers", format_number(args.workers))
+    print_kv("Timeout", f"{format_number(args.timeout_seconds)} seconds")
 
     if args.dry_run:
-        for job in jobs:
+        for index, job in enumerate(jobs, start=1):
+            print_job_header(index, len(jobs), job)
             run_extraction(job, args.force_extract, dry_run=True)
             run_conversion(job, args)
         return 0
@@ -234,17 +271,27 @@ def run_case(
     total_summary = ValidationSummary()
 
     try:
-        for job in jobs:
+        for index, job in enumerate(jobs, start=1):
+            print_job_header(index, len(jobs), job)
             if not args.validate_only:
+                print_section("Extraction")
+                print_kv("Status", "running")
                 _ran, elapsed = run_extraction(job, args.force_extract, dry_run=False)
                 total_extract += elapsed
-                wait_for_stable_eml_tree(
+                print_section("Extraction")
+                print_kv("Status", "completed" if elapsed else "skipped")
+                print_kv("Elapsed", format_elapsed(elapsed))
+                print_kv("Log", job.extract_log)
+                print_section("Waiting for stable EML output")
+                snapshot = wait_for_stable_eml_tree(
                     job.eml_dir,
                     job.slug,
                     stable_seconds=args.eml_stability_seconds,
                     check_interval=args.eml_stability_check_interval,
                     max_wait_seconds=args.eml_stability_max_wait,
                 )
+                print_kv("EML count", format_number(snapshot.count))
+                print_kv("Status", "stable")
                 total_convert += run_conversion(job, args)
             summary = validate_output(job.eml_dir, job.pdf_dir, job.manifest)
             total_summary.add(summary)
@@ -255,11 +302,7 @@ def run_case(
         return 130
 
     total_elapsed = time.monotonic() - started_at
-    print_validation("total", total_summary)
-    print(
-        f"timing total={format_elapsed(total_elapsed)} "
-        f"extraction={format_elapsed(total_extract)} conversion={format_elapsed(total_convert)}"
-    )
+    print_case_summary(args.case_dir, jobs, total_summary, total_elapsed, total_extract, total_convert)
     if total_summary.has_consistency_errors():
         return 1
     return 0
