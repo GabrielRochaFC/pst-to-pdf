@@ -125,6 +125,8 @@ def run_conversion(job: PstJob, args: argparse.Namespace) -> float:
         str(args.eml_stability_check_interval),
         "--eml-stability-max-wait",
         str(args.eml_stability_max_wait),
+        "--case-dir",
+        str(args.case_dir),
     ]
     print_section("Conversion")
     print_kv("Status", "planned" if args.dry_run else "running")

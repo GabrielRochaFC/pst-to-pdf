@@ -236,6 +236,22 @@ def parse_message(eml_path: Path) -> tuple[dict[str, str], str]:
     return metadata, message_body_text(message)
 
 
+def display_eml_path(eml_path: Path, case_dir: Path | None) -> str:
+    """Return a display path for the PDF: relative to case_dir.parent when possible.
+
+    Keeps the case directory name in the displayed path so the reader can
+    identify which case the email belongs to without exposing the full host path.
+    Falls back to the absolute path if case_dir is None or the EML path is
+    not under case_dir.parent.
+    """
+    if case_dir is not None:
+        try:
+            return str(eml_path.relative_to(case_dir.parent))
+        except ValueError:
+            pass
+    return str(eml_path)
+
+
 def block_external_fetches(url: str, *args: object, **kwargs: object) -> dict[str, bytes | str]:
     raise ValueError(f"External resource loading is disabled for PDF generation: {url}")
 
@@ -253,7 +269,6 @@ def pdf_html(metadata: dict[str, str], body: str) -> str:
   <style>
     @page {{ size: A4; margin: 18mm 15mm; }}
     body {{ font-family: sans-serif; font-size: 11pt; line-height: 1.45; color: #111; }}
-    h1 {{ font-size: 16pt; margin: 0 0 12pt; }}
     table {{ width: 100%; border-collapse: collapse; margin-bottom: 16pt; table-layout: fixed; }}
     th, td {{ border: 1px solid #bbb; padding: 5pt; vertical-align: top; overflow-wrap: anywhere; }}
     th {{ width: 28%; background: #f2f2f2; text-align: left; }}
@@ -261,7 +276,6 @@ def pdf_html(metadata: dict[str, str], body: str) -> str:
   </style>
 </head>
 <body>
-  <h1>Email PDF Export</h1>
   <table>{rows}</table>
   <pre>{safe_body}</pre>
 </body>
@@ -291,7 +305,6 @@ def write_fast_pdf(pdf_path: Path, metadata: dict[str, str], body: str) -> None:
 
     styles = getSampleStyleSheet()
     normal = ParagraphStyle("EmailNormal", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=12)
-    heading = ParagraphStyle("EmailHeading", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=14, leading=18)
     label_style = ParagraphStyle("EmailLabel", parent=normal, fontName="Helvetica-Bold", spaceBefore=4)
 
     doc = SimpleDocTemplate(
@@ -302,7 +315,7 @@ def write_fast_pdf(pdf_path: Path, metadata: dict[str, str], body: str) -> None:
         topMargin=16 * mm,
         bottomMargin=16 * mm,
     )
-    story: list = [Paragraph("Email PDF Export", heading), Spacer(1, 4 * mm)]
+    story: list = []
 
     for name in HEADER_LABELS:
         raw = sanitize_header_value(metadata.get(name, ""))
@@ -358,12 +371,14 @@ def status_row(source_pst: Path, pst_sha256: str, eml_path: Path, pdf_path: Path
     }
 
 
-def convert_task(task: Task, eml_root: Path, source_pst: Path, pst_sha256: str, mode: str) -> dict[str, str]:
+def convert_task(task: Task, eml_root: Path, source_pst: Path, pst_sha256: str, mode: str, case_dir: Path | None = None) -> dict[str, str]:
     metadata, body = parse_message(task.eml_path)
+    display_metadata = dict(metadata)
+    display_metadata["Source EML path"] = display_eml_path(task.eml_path, case_dir)
     if mode == "weasyprint":
-        write_weasy_pdf(task.pdf_path, metadata, body)
+        write_weasy_pdf(task.pdf_path, display_metadata, body)
     else:
-        write_fast_pdf(task.pdf_path, metadata, body)
+        write_fast_pdf(task.pdf_path, display_metadata, body)
     return base_row(source_pst, pst_sha256, task.eml_path, task.pdf_path, metadata)
 
 
@@ -372,9 +387,10 @@ def recover_existing_pdf_row(task: Task, source_pst: Path, pst_sha256: str) -> d
     return base_row(source_pst, pst_sha256, task.eml_path, task.pdf_path, metadata)
 
 
-def worker_main(queue: mp.Queue, task: Task, eml_root: str, source_pst: str, pst_sha256: str, mode: str) -> None:
+def worker_main(queue: mp.Queue, task: Task, eml_root: str, source_pst: str, pst_sha256: str, mode: str, case_dir_str: str = "") -> None:
     try:
-        row = convert_task(task, Path(eml_root), Path(source_pst), pst_sha256, mode)
+        case_dir = Path(case_dir_str) if case_dir_str else None
+        row = convert_task(task, Path(eml_root), Path(source_pst), pst_sha256, mode, case_dir)
     except Exception as exc:  # noqa: BLE001 - main process records failure row
         row = status_row(Path(source_pst), pst_sha256, task.eml_path, task.pdf_path, "error", f"{type(exc).__name__}: {exc}")
     queue.put(row)
@@ -450,9 +466,10 @@ def ensure_safe_outputs(pdf_dir: Path, manifest: Path, force: bool, resume: bool
 
 def start_task(context: Any, task: Task, args: argparse.Namespace, pst_sha256: str) -> RunningTask:
     queue: mp.Queue = context.Queue(maxsize=1)
+    case_dir_str = str(args.case_dir) if getattr(args, "case_dir", None) else ""
     process = context.Process(
         target=worker_main,
-        args=(queue, task, str(args.eml_dir), str(args.source_pst), pst_sha256, args.mode),
+        args=(queue, task, str(args.eml_dir), str(args.source_pst), pst_sha256, args.mode, case_dir_str),
     )
     process.start()
     return RunningTask(task=task, process=process, queue=queue, started_at=time.monotonic())
@@ -491,6 +508,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pdf-dir", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--log-file", required=True, type=Path)
+    parser.add_argument("--case-dir", type=Path, default=None, help="Case directory. EML paths shown in PDFs are made relative to its parent.")
     parser.add_argument("--force", action="store_true", help="Allow writing into existing output without resume.")
     parser.add_argument("--resume", action="store_true", help="Skip successful manifest rows and append only remaining work.")
     parser.add_argument("--mode", choices=["fast", "weasyprint"], default="fast", help="PDF engine. fast uses ReportLab; weasyprint renders constructed HTML.")

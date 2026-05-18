@@ -1,4 +1,4 @@
-"""Synthetic tests for write_fast_pdf layout and header sanitization.
+"""Synthetic tests for write_fast_pdf layout, header sanitization, and EML path display.
 
 No real PST/EML/PDF case files are used.
 """
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pst_to_pdf.converter import sanitize_header_value, write_fast_pdf
+from pst_to_pdf.converter import display_eml_path, sanitize_header_value, write_fast_pdf
 
 _REPORTLAB_AVAILABLE = importlib.util.find_spec("reportlab") is not None
 _skip_no_reportlab = unittest.skipUnless(_REPORTLAB_AVAILABLE, "reportlab not installed")
@@ -102,6 +102,87 @@ class TestFastPDFLayout(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="pst_pdf_test_") as tmpdir:
             pdf_path = Path(tmpdir) / "multiline.pdf"
             write_fast_pdf(pdf_path, _sample_metadata(), body)
+            self.assertTrue(pdf_path.exists())
+            self.assertGreater(pdf_path.stat().st_size, 0)
+
+
+class TestDisplayEmlPath(unittest.TestCase):
+    """Tests for display_eml_path — all use synthetic/fake paths only."""
+
+    def test_relative_to_case_parent(self):
+        """EML path inside case_dir is displayed relative to case_dir.parent."""
+        case_dir = Path("/tmp/pst-cases/coordenacao-gestaoambiental-psts")
+        eml_path = (
+            case_dir
+            / "output/coordenacao-gestaoambiental-001/eml"
+            / "coordenacao.gestaoambiental@incra.gov.br.001"
+            / "Top-of-Information-Store/Inbox/124.eml"
+        )
+        result = display_eml_path(eml_path, case_dir)
+        expected = (
+            "coordenacao-gestaoambiental-psts/output/coordenacao-gestaoambiental-001/eml"
+            "/coordenacao.gestaoambiental@incra.gov.br.001"
+            "/Top-of-Information-Store/Inbox/124.eml"
+        )
+        self.assertEqual(result, expected)
+
+    def test_keeps_case_directory_name(self):
+        """Displayed path starts with the case directory name, not just 'output/'."""
+        case_dir = Path("/tmp/pst-cases/my-case-dir")
+        eml_path = case_dir / "output/slug-001/eml/msg.eml"
+        result = display_eml_path(eml_path, case_dir)
+        self.assertTrue(
+            result.startswith("my-case-dir/"),
+            f"Expected path to start with 'my-case-dir/', got: {result!r}",
+        )
+
+    def test_does_not_start_with_output(self):
+        """Displayed path must not start with 'output/' — case dir name must precede it."""
+        case_dir = Path("/tmp/pst-cases/my-case")
+        eml_path = case_dir / "output/slug/eml/msg.eml"
+        result = display_eml_path(eml_path, case_dir)
+        self.assertFalse(
+            result.startswith("output/"),
+            f"Path starts with 'output/' instead of case dir name: {result!r}",
+        )
+
+    def test_fallback_when_eml_outside_case_parent(self):
+        """EML path not under case_dir.parent falls back to its absolute string."""
+        case_dir = Path("/tmp/cases/my-case")
+        eml_path = Path("/other/location/msg.eml")
+        result = display_eml_path(eml_path, case_dir)
+        self.assertEqual(result, str(eml_path))
+
+    def test_fallback_when_no_case_dir(self):
+        """None case_dir returns the absolute path unchanged."""
+        eml_path = Path("/some/absolute/path/msg.eml")
+        result = display_eml_path(eml_path, None)
+        self.assertEqual(result, str(eml_path))
+
+    def test_eml_exactly_in_case_parent_sibling(self):
+        """An EML that lives in a sibling of case_dir falls back gracefully."""
+        case_dir = Path("/tmp/cases/case-a")
+        eml_path = Path("/tmp/cases/case-b/output/slug/eml/msg.eml")
+        # case-b is a sibling of case-a; it IS under case_dir.parent (/tmp/cases)
+        result = display_eml_path(eml_path, case_dir)
+        self.assertTrue(result.startswith("case-b/"))
+
+
+@_skip_no_reportlab
+class TestFastPDFNoTitle(unittest.TestCase):
+    def test_generated_pdf_does_not_embed_old_title(self):
+        """PDF generated after title removal must still be a valid non-empty file."""
+        with tempfile.TemporaryDirectory(prefix="pst_pdf_notitle_") as tmpdir:
+            pdf_path = Path(tmpdir) / "notitle.pdf"
+            write_fast_pdf(pdf_path, _sample_metadata(), "Body text.")
+            self.assertTrue(pdf_path.exists())
+            self.assertGreater(pdf_path.stat().st_size, 0)
+
+    def test_metadata_only_email_renders(self):
+        """Empty body must not crash when the title is absent."""
+        with tempfile.TemporaryDirectory(prefix="pst_pdf_notitle_") as tmpdir:
+            pdf_path = Path(tmpdir) / "empty_body_notitle.pdf"
+            write_fast_pdf(pdf_path, _sample_metadata(), "")
             self.assertTrue(pdf_path.exists())
             self.assertGreater(pdf_path.stat().st_size, 0)
 
