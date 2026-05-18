@@ -1,4 +1,4 @@
-[🇺🇸 English](README.md) · [🇧🇷 Português](README.pt-BR.md) · [🇪🇸 Español](README.es.md)
+[🇺🇸 English](README.md) · [🇧🇷 Português](docs/README.pt-BR.md) · [🇪🇸 Español](docs/README.es.md)
 
 # pst-to-pdf
 
@@ -35,18 +35,16 @@ pipx ensurepath
 
 ## Installation
 
-```bash
-pipx install pst-to-pdf
-```
-
-<details>
-<summary>Editable install for development</summary>
+Clone the repository and install locally:
 
 ```bash
+git clone <repo-url>
+cd pst-to-pdf-incra
 pipx install --editable . --force
 ```
 
-</details>
+> [!NOTE]
+> `pipx install pst-to-pdf` will be available once the package is published to PyPI.
 
 ## Usage
 

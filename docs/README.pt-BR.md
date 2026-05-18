@@ -1,11 +1,11 @@
-[🇺🇸 English](README.md) · [🇧🇷 Português](README.pt-BR.md) · [🇪🇸 Español](README.es.md)
+[🇺🇸 English](../README.md) · [🇧🇷 Português](README.pt-BR.md) · [🇪🇸 Español](README.es.md)
 
-> *Esta tradução pode estar desatualizada em relação à versão em inglês. Para as informações mais recentes, consulte [README.md](README.md).*
+> *Esta tradução pode estar desatualizada em relação à versão em inglês. Para as informações mais recentes, consulte [README.md](../README.md).*
 
 # pst-to-pdf
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![Licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green)](LICENSE)
+[![Licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green)](../LICENSE)
 [![Plataforma: Linux](https://img.shields.io/badge/plataforma-Linux-lightgrey?logo=linux&logoColor=white)](https://www.kernel.org/)
 [![Motores PDF](https://img.shields.io/badge/PDF-ReportLab%20%C2%B7%20WeasyPrint-blue)](https://www.reportlab.com/)
 [![Privacidade: 100% local](https://img.shields.io/badge/privacidade-100%25%20local-brightgreen)](README.pt-BR.md)
@@ -37,18 +37,16 @@ pipx ensurepath
 
 ## Instalação
 
-```bash
-pipx install pst-to-pdf
-```
-
-<details>
-<summary>Instalação editável para desenvolvimento</summary>
+Clone o repositório e instale localmente:
 
 ```bash
+git clone <repo-url>
+cd pst-to-pdf-incra
 pipx install --editable . --force
 ```
 
-</details>
+> [!NOTE]
+> `pipx install pst-to-pdf` estará disponível após a publicação do pacote no PyPI.
 
 ## Uso
 
@@ -154,4 +152,4 @@ python3 -m pytest tests/
 
 ## Licença
 
-[MIT](LICENSE)
+[MIT](../LICENSE)
