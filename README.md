@@ -125,6 +125,66 @@ sudo apt install python3 python3-venv python3-pip pff-tools \
 
 `pff-tools` (`pffinfo`, `pffexport`) are fallback inspection tools only; `readpst` is the primary extractor.
 
+## Filtering by email participant
+
+By default, every EML extracted from a PST is converted to a PDF. You can
+optionally restrict PDF generation to messages whose participant headers
+contain at least one of a list of email addresses.
+
+### Via the wizard
+
+Step 4/5 of the wizard asks:
+
+```
+Enable email filter (y/n) [n*]:
+```
+
+Answer `y` and provide a comma-separated list:
+
+```
+Enter email addresses, separated by commas:
+email1@example.com, email2@example.com
+```
+
+The wizard stores the normalized list at `case_dir/config/filter_emails.txt`
+and a sha256 fingerprint at `case_dir/config/filter_emails.fingerprint`.
+
+### Via CLI (advanced)
+
+```bash
+python3 -m pst_to_pdf.processor --case-dir /path/to/case \
+  --filter-email a@x.com --filter-email b@y.com
+
+python3 -m pst_to_pdf.processor --case-dir /path/to/case \
+  --filter-emails-file /path/to/emails.txt
+```
+
+The file format is one email per line; blank lines and `#`-prefixed comments
+are ignored. Both flags can be combined; addresses are deduped.
+
+### How matching works
+
+A message matches the filter if any address in any of these headers is in the
+filter set:
+
+- `From`, `To`, `Cc`, `Bcc`, `Reply-To`, `Sender`
+
+Matching is exact (case-insensitive). The body, subject, and attachment
+filenames are **not** checked.
+
+### How non-matching messages are recorded
+
+Non-matching EMLs do not produce PDFs. Instead, the manifest records a row
+with `status=filtered`. Filtered rows count as covered EMLs in validation and
+never make validation fail.
+
+### Changing the filter
+
+If you want to use a different filter, create a new case directory. Re-running
+with a different filter on the same case is blocked by a fingerprint check;
+pass `--force-filter` only if you know you want to overwrite the case's stored
+filter.
+
 ## Development
 
 ```bash

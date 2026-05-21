@@ -20,6 +20,7 @@ class ValidationSummary:
     successful_rows: int = 0
     failed_rows: int = 0
     timeout_rows: int = 0
+    filtered_rows: int = 0
     duplicate_eml_rows: int = 0
     missing_pdfs_for_successful_rows: int = 0
     eml_files_missing_manifest_rows: int = 0
@@ -33,6 +34,7 @@ class ValidationSummary:
         self.successful_rows += other.successful_rows
         self.failed_rows += other.failed_rows
         self.timeout_rows += other.timeout_rows
+        self.filtered_rows += other.filtered_rows
         self.duplicate_eml_rows += other.duplicate_eml_rows
         self.missing_pdfs_for_successful_rows += other.missing_pdfs_for_successful_rows
         self.eml_files_missing_manifest_rows += other.eml_files_missing_manifest_rows
@@ -90,6 +92,7 @@ def validate_output(eml_dir: Path, pdf_dir: Path, manifest: Path) -> ValidationS
         successful_rows=statuses.get("ok", 0),
         failed_rows=statuses.get("error", 0),
         timeout_rows=statuses.get("timeout", 0),
+        filtered_rows=statuses.get("filtered", 0),
         duplicate_eml_rows=duplicate_eml_rows,
         missing_pdfs_for_successful_rows=missing_pdfs,
         eml_files_missing_manifest_rows=len(eml_paths_on_disk - manifest_eml_paths),
@@ -123,6 +126,7 @@ def print_validation_block(label: str, summary: ValidationSummary) -> None:
     print_kv("Successful rows", format_number(summary.successful_rows))
     print_kv("Failed rows", format_number(summary.failed_rows))
     print_kv("Timeout rows", format_number(summary.timeout_rows))
+    print_kv("Filtered rows", format_number(summary.filtered_rows))
     print_kv("Duplicate EML rows", format_number(summary.duplicate_eml_rows))
     print_kv("Missing PDFs for OK rows", format_number(summary.missing_pdfs_for_successful_rows))
     print_kv("EMLs missing manifest rows", format_number(summary.eml_files_missing_manifest_rows))

@@ -29,6 +29,10 @@ from pst_to_pdf.output import format_number, green, print_kv, print_section, yel
 from pst_to_pdf.validator import ValidationSummary, print_validation_block, validate_output
 
 
+FILTER_FILE_RELPATH = Path("config") / "filter_emails.txt"
+FILTER_FINGERPRINT_RELPATH = Path("config") / "filter_emails.fingerprint"
+
+
 @dataclass(frozen=True)
 class PstJob:
     pst_path: Path
@@ -128,6 +132,9 @@ def run_conversion(job: PstJob, args: argparse.Namespace) -> float:
         "--case-dir",
         str(args.case_dir),
     ]
+    filter_file = getattr(args, "filter_file", None)
+    if filter_file:
+        command.extend(["--filter-file", str(filter_file)])
     print_section("Conversion")
     print_kv("Status", "planned" if args.dry_run else "running")
     if args.dry_run:
@@ -172,6 +179,7 @@ def print_case_summary(case_dir: Path, jobs: list[PstJob], summary: ValidationSu
     print_kv("Total PDFs", format_number(summary.total_pdf_files))
     print_kv("Manifest rows", format_number(summary.total_manifest_rows))
     print_kv("Successful", format_number(summary.successful_rows))
+    print_kv("Filtered", format_number(summary.filtered_rows))
     print_kv("Failed", format_number(summary.failed_rows))
     print_kv("Timeout", format_number(summary.timeout_rows))
     print()
@@ -208,7 +216,70 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eml-stability-seconds", type=int, default=10, help="Seconds the EML tree must stay unchanged before conversion.")
     parser.add_argument("--eml-stability-check-interval", type=int, default=2, help="Seconds between EML tree stability checks.")
     parser.add_argument("--eml-stability-max-wait", type=int, default=600, help="Maximum seconds to wait for EML tree stability.")
+    parser.add_argument(
+        "--filter-email",
+        action="append",
+        default=[],
+        help="Email address to include in the participant filter. Repeatable.",
+    )
+    parser.add_argument(
+        "--filter-emails-file",
+        type=Path,
+        default=None,
+        help="File containing one email per line (blank lines and # comments ignored).",
+    )
+    parser.add_argument(
+        "--force-filter",
+        action="store_true",
+        help="Overwrite the case's stored filter even if it differs from a prior run.",
+    )
     return parser.parse_args()
+
+
+def prepare_case_filter(
+    case_dir: Path,
+    filter_emails: list[str],
+    force_filter: bool,
+) -> Path:
+    """Write the filter file + fingerprint into the case directory.
+
+    Aborts with SystemExit if a prior fingerprint differs and `force_filter`
+    is False.
+    """
+    from pst_to_pdf.filter_emails import filter_fingerprint, normalize_email, write_filter_file
+
+    filter_file = case_dir / FILTER_FILE_RELPATH
+    fingerprint_file = case_dir / FILTER_FINGERPRINT_RELPATH
+    # Normalize + dedupe (first-seen order) so the on-disk file matches the
+    # fingerprint and matches the canonical form produced by load_filter_file /
+    # parse_email_list.
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for raw in filter_emails:
+        n = normalize_email(raw)
+        if n is None or n in seen:
+            continue
+        seen.add(n)
+        normalized.append(n)
+    current_fp = filter_fingerprint(normalized)
+    if fingerprint_file.exists():
+        prior_fp = fingerprint_file.read_text(encoding="utf-8").strip()
+        if prior_fp != current_fp:
+            if not force_filter:
+                raise SystemExit(
+                    "Filter set differs from the one already used for this case.\n"
+                    f"  Existing fingerprint: {prior_fp}\n"
+                    f"  Current fingerprint:  {current_fp}\n"
+                    "Create a new case directory for a different filter,\n"
+                    "or pass --force-filter to override the filter for this case."
+                )
+            print(yellow(
+                "WARNING: --force-filter overrides the prior filter for this case."
+            ))
+    write_filter_file(filter_file, normalized)
+    fingerprint_file.parent.mkdir(parents=True, exist_ok=True)
+    fingerprint_file.write_text(current_fp + "\n", encoding="utf-8")
+    return filter_file
 
 
 def run_case(
@@ -222,8 +293,11 @@ def run_case(
     eml_stability_seconds: int = 10,
     eml_stability_check_interval: int = 2,
     eml_stability_max_wait: int = 600,
+    filter_emails: list[str] | None = None,
+    force_filter: bool = False,
 ) -> int:
     """Run the standard local PST processing workflow for one case directory."""
+    filter_emails = filter_emails or []
     args = argparse.Namespace(
         case_dir=case_dir,
         mode=mode,
@@ -235,6 +309,8 @@ def run_case(
         eml_stability_seconds=eml_stability_seconds,
         eml_stability_check_interval=eml_stability_check_interval,
         eml_stability_max_wait=eml_stability_max_wait,
+        filter_emails=filter_emails,
+        force_filter=force_filter,
     )
     started_at = time.monotonic()
 
@@ -248,6 +324,11 @@ def run_case(
         raise SystemExit("--eml-stability-seconds must be >= 0")
     if not args.validate_only:
         ensure_readpst_available()
+
+    filter_file: Path | None = None
+    if not args.validate_only and not args.dry_run and args.filter_emails:
+        filter_file = prepare_case_filter(args.case_dir, args.filter_emails, args.force_filter)
+    args.filter_file = filter_file
 
     input_dir = args.case_dir / "input"
     if not input_dir.is_dir():
@@ -308,7 +389,25 @@ def run_case(
 
 
 def main() -> int:
+    from pst_to_pdf.filter_emails import load_filter_file, parse_email_list
+
     args = parse_args()
+    filter_emails: list[str] = []
+    if args.filter_emails_file is not None:
+        if not args.filter_emails_file.is_file():
+            raise SystemExit(f"Filter emails file not found: {args.filter_emails_file}")
+        filter_emails.extend(load_filter_file(args.filter_emails_file))
+    if args.filter_email:
+        filter_emails.extend(parse_email_list(",".join(args.filter_email)))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for e in filter_emails:
+        if e and e not in seen:
+            seen.add(e)
+            deduped.append(e)
+    if (args.filter_email or args.filter_emails_file) and not deduped:
+        raise SystemExit("Filter requested but no valid email addresses provided.")
+
     return run_case(
         case_dir=args.case_dir,
         mode=args.mode,
@@ -320,6 +419,8 @@ def main() -> int:
         eml_stability_seconds=args.eml_stability_seconds,
         eml_stability_check_interval=args.eml_stability_check_interval,
         eml_stability_max_wait=args.eml_stability_max_wait,
+        filter_emails=deduped,
+        force_filter=args.force_filter,
     )
 
 

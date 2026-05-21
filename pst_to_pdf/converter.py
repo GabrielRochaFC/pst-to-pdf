@@ -371,6 +371,61 @@ def status_row(source_pst: Path, pst_sha256: str, eml_path: Path, pdf_path: Path
     }
 
 
+def filtered_row(
+    source_pst: Path,
+    pst_sha256: str,
+    eml_path: Path,
+    metadata: dict[str, str],
+) -> dict[str, str]:
+    """Manifest row for an EML skipped by the participant filter.
+
+    Records participant headers so the filter decision is auditable from the
+    manifest alone. No body content is included.
+    """
+    return {
+        "source_pst_path": str(source_pst),
+        "source_pst_sha256": pst_sha256,
+        "eml_path": str(eml_path),
+        "pdf_path": "",
+        "subject": metadata.get("Subject", ""),
+        "from": metadata.get("From", ""),
+        "to": metadata.get("To", ""),
+        "cc": metadata.get("Cc", ""),
+        "bcc": metadata.get("Bcc", ""),
+        "date": metadata.get("Date", ""),
+        "message_id": metadata.get("Message-ID", ""),
+        "attachment_filenames": "",
+        "status": "filtered",
+        "error": "filtered by email participant",
+    }
+
+
+def filter_check_eml(
+    eml_path: Path,
+    filter_set: frozenset[str],
+) -> tuple[bool, dict[str, str]]:
+    """Header-only filter check.
+
+    Parses just the EML headers — never the body. Returns (matched, metadata)
+    where `metadata` carries the participant + audit headers needed to write
+    either a `filtered` manifest row or a normal one.
+    """
+    from pst_to_pdf.filter_emails import message_matches
+
+    with eml_path.open("rb") as handle:
+        message = BytesParser(policy=policy.default).parse(handle, headersonly=True)
+    metadata = {
+        "Subject": header_value(message, "subject"),
+        "From":    header_value(message, "from"),
+        "To":      header_value(message, "to"),
+        "Cc":      header_value(message, "cc"),
+        "Bcc":     header_value(message, "bcc"),
+        "Date":    header_value(message, "date"),
+        "Message-ID": header_value(message, "message-id"),
+    }
+    return message_matches(message, filter_set), metadata
+
+
 def convert_task(task: Task, eml_root: Path, source_pst: Path, pst_sha256: str, mode: str, case_dir: Path | None = None) -> dict[str, str]:
     metadata, body = parse_message(task.eml_path)
     display_metadata = dict(metadata)
@@ -443,16 +498,24 @@ def write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
             writer.writerow({field: row.get(field, "") for field in MANIFEST_FIELDS})
 
 
-def prepare_manifest(manifest: Path, resume: bool) -> tuple[set[str], int, Path | None]:
+def prepare_manifest(manifest: Path, resume: bool) -> tuple[set[str], set[str], int, Path | None]:
+    """Prepare manifest for resume.
+
+    Returns (successful_paths, filtered_paths, kept_row_count, backup). On resume,
+    both `ok` and `filtered` rows are retained — filtered rows represent
+    intentional skips that don't need to be redone. `error` and `timeout` rows
+    are dropped so the converter can retry them.
+    """
     rows = read_manifest_rows(manifest)
     backup = None
     if rows and resume:
         compact = deduplicate_manifest_rows(rows)
         backup = backup_manifest(manifest)
-        rows = [row for row in compact if row.get("status") == "ok"]
+        rows = [row for row in compact if row.get("status") in {"ok", "filtered"}]
         write_manifest(manifest, rows)
     successful = {row["eml_path"] for row in rows if row.get("status") == "ok" and row.get("eml_path")}
-    return successful, len(rows), backup
+    filtered = {row["eml_path"] for row in rows if row.get("status") == "filtered" and row.get("eml_path")}
+    return successful, filtered, len(rows), backup
 
 
 def ensure_safe_outputs(pdf_dir: Path, manifest: Path, force: bool, resume: bool) -> None:
@@ -517,6 +580,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eml-stability-seconds", type=int, default=10, help="Seconds the EML tree must stay unchanged before task enumeration.")
     parser.add_argument("--eml-stability-check-interval", type=int, default=2, help="Seconds between EML tree stability checks.")
     parser.add_argument("--eml-stability-max-wait", type=int, default=600, help="Maximum seconds to wait for EML tree stability.")
+    parser.add_argument(
+        "--filter-file",
+        type=Path,
+        default=None,
+        help="Path to a file containing one normalized email address per line. "
+             "When set, only EMLs whose participant headers contain at least "
+             "one of these addresses produce PDFs; others get status=filtered.",
+    )
+    parser.add_argument(
+        "--filter-email",
+        action="append",
+        default=[],
+        help="Email address to include in the participant filter. Repeatable. "
+             "Merged with --filter-file if both are provided.",
+    )
     return parser.parse_args()
 
 
@@ -534,6 +612,7 @@ def _conversion_progress_line(
     converted: int,
     recovered: int,
     skipped: int,
+    filtered: int,
     failed: int,
     timed_out: int,
     started_at: float,
@@ -548,6 +627,7 @@ def _conversion_progress_line(
     return (
         f"[{label}] {format_number(processed)}/{format_number(total)} ({pct:.1f}%)"
         f" | ok {format_number(ok)}"
+        f" | filtered {format_number(filtered)}"
         f" | skip {format_number(skipped)}"
         f" | fail {format_number(failed)}"
         f" | t/o {format_number(timed_out)}"
@@ -563,6 +643,7 @@ def print_conversion_progress(
     converted: int,
     recovered: int,
     skipped: int,
+    filtered: int,
     failed: int,
     timed_out: int,
     started_at: float,
@@ -578,6 +659,7 @@ def print_conversion_progress(
     print_kv("Progress", f"{format_number(processed)} / {format_number(total)} ({pct:.1f}%)")
     print_kv("Converted", format_number(converted))
     print_kv("Recovered", format_number(recovered))
+    print_kv("Filtered", format_number(filtered))
     print_kv("Skipped", format_number(skipped))
     print_kv("Failed", format_number(failed))
     print_kv("Timeout", format_number(timed_out))
@@ -599,6 +681,25 @@ def main() -> int:
     if args.eml_stability_seconds < 0:
         raise SystemExit("--eml-stability-seconds must be >= 0")
 
+    from pst_to_pdf.filter_emails import load_filter_file, parse_email_list
+
+    filter_emails_list: list[str] = []
+    if args.filter_file is not None:
+        if not args.filter_file.is_file():
+            raise SystemExit(f"Filter file not found: {args.filter_file}")
+        filter_emails_list.extend(load_filter_file(args.filter_file))
+    if args.filter_email:
+        filter_emails_list.extend(parse_email_list(",".join(args.filter_email)))
+    seen_filter: set[str] = set()
+    deduped_filter: list[str] = []
+    for e in filter_emails_list:
+        if e and e not in seen_filter:
+            seen_filter.add(e)
+            deduped_filter.append(e)
+    filter_set: frozenset[str] = frozenset(deduped_filter)
+    if (args.filter_file or args.filter_email) and not filter_set:
+        raise SystemExit("Filter requested but no valid email addresses provided.")
+
     ensure_safe_outputs(args.pdf_dir, args.manifest, args.force, args.resume)
     args.pdf_dir.mkdir(parents=True, exist_ok=True)
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -618,7 +719,7 @@ def main() -> int:
     logging.info("EML tree stable count=%s size=%s newest_mtime=%s", snapshot.count, snapshot.total_size, snapshot.newest_mtime)
 
     pst_sha256 = sha256_file(args.source_pst)
-    successful_paths, existing_rows, backup = prepare_manifest(args.manifest, args.resume)
+    successful_paths, filtered_paths, existing_rows, backup = prepare_manifest(args.manifest, args.resume)
     if backup:
         logging.info("Backed up manifest to %s", backup)
 
@@ -632,6 +733,7 @@ def main() -> int:
     converted = 0
     failed = 0
     timed_out = 0
+    filtered = 0
     processed = 0
     last_progress_logged = 0   # for log-every-100
     last_block_reported = 0    # for non-TTY block-every-100
@@ -663,6 +765,11 @@ def main() -> int:
                         processed += 1
                         continue
 
+                    if filter_set and str(task.eml_path) in filtered_paths:
+                        skipped += 1
+                        processed += 1
+                        continue
+
                     if args.resume and task.pdf_path.exists():
                         row = recover_existing_pdf_row(task, args.source_pst, pst_sha256)
                         successful_paths.add(str(task.eml_path))
@@ -671,6 +778,28 @@ def main() -> int:
                         recovered += 1
                         processed += 1
                         continue
+
+                    if filter_set:
+                        try:
+                            matched, header_metadata = filter_check_eml(task.eml_path, filter_set)
+                        except Exception as exc:  # noqa: BLE001
+                            logging.warning(
+                                "Filter header parse failed eml=%s err=%s",
+                                task.eml_path, exc,
+                            )
+                            running.append(start_task(context, task, args, pst_sha256))
+                            continue
+                        if not matched:
+                            row = filtered_row(
+                                args.source_pst, pst_sha256,
+                                task.eml_path, header_metadata,
+                            )
+                            filtered_paths.add(str(task.eml_path))
+                            writer.writerow(row)
+                            csvfile.flush()
+                            filtered += 1
+                            processed += 1
+                            continue
 
                     running.append(start_task(context, task, args, pst_sha256))
 
@@ -694,20 +823,20 @@ def main() -> int:
                 if progress_bucket > last_progress_logged:
                     last_progress_logged = progress_bucket
                     logging.info(
-                        "Progress processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s",
-                        processed, converted, recovered, skipped, failed, timed_out,
+                        "Progress processed=%s converted=%s recovered=%s filtered=%s skipped=%s failed=%s timeout=%s remaining=%s elapsed=%s",
+                        processed, converted, recovered, filtered, skipped, failed, timed_out,
                         total - processed, format_elapsed(time.monotonic() - started_at),
                     )
 
                 now = time.monotonic()
                 if is_tty:
                     if now - last_dynamic_update >= 1.0:
-                        write_dynamic_line(_conversion_progress_line(label, processed, total, converted, recovered, skipped, failed, timed_out, started_at))
+                        write_dynamic_line(_conversion_progress_line(label, processed, total, converted, recovered, skipped, filtered, failed, timed_out, started_at))
                         last_dynamic_update = now
                 else:
                     if progress_bucket > last_block_reported:
                         last_block_reported = progress_bucket
-                        print_conversion_progress(label, processed, total, converted, recovered, skipped, failed, timed_out, started_at)
+                        print_conversion_progress(label, processed, total, converted, recovered, skipped, filtered, failed, timed_out, started_at)
 
                 if running and (exhausted or len(running) >= args.workers):
                     time.sleep(0.2)
@@ -723,7 +852,7 @@ def main() -> int:
                     item.process.join()
         elapsed = format_elapsed(time.monotonic() - started_at)
         print(f"Interrupted. Partial manifest kept at {args.manifest}. Resume with --resume. elapsed={elapsed}", flush=True)
-        logging.warning("Interrupted by user elapsed=%s processed=%s converted=%s recovered=%s skipped=%s failed=%s timeout=%s", elapsed, processed, converted, recovered, skipped, failed, timed_out)
+        logging.warning("Interrupted by user elapsed=%s processed=%s converted=%s recovered=%s filtered=%s skipped=%s failed=%s timeout=%s", elapsed, processed, converted, recovered, filtered, skipped, failed, timed_out)
         return 130
 
     if is_tty:
@@ -733,11 +862,12 @@ def main() -> int:
     elapsed_seconds = time.monotonic() - started_at
     elapsed = format_elapsed(elapsed_seconds)
     rate = (processed / elapsed_seconds * 60) if elapsed_seconds > 0 else 0.0
-    logging.info("Finished conversion converted=%s recovered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s elapsed=%s rate_per_min=%.2f", converted, recovered, skipped, failed, timed_out, dict(final), existing_rows, elapsed, rate)
+    logging.info("Finished conversion converted=%s recovered=%s filtered=%s skipped=%s failed=%s timeout=%s manifest_statuses=%s existing_rows_before=%s elapsed=%s rate_per_min=%.2f", converted, recovered, filtered, skipped, failed, timed_out, dict(final), existing_rows, elapsed, rate)
     print_section(f"Conversion finished — {label}")
     print_kv("Processed", format_number(processed))
     print_kv("Converted", format_number(converted))
     print_kv("Recovered", format_number(recovered))
+    print_kv("Filtered", format_number(filtered))
     print_kv("Skipped", format_number(skipped))
     print_kv("Failed", format_number(failed))
     print_kv("Timeout", format_number(timed_out))

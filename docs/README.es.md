@@ -127,6 +127,67 @@ sudo apt install python3 python3-venv python3-pip pff-tools \
 
 `pff-tools` (`pffinfo`, `pffexport`) son herramientas de inspección alternativas; `readpst` es el extractor principal.
 
+## Filtrado por participante de correo
+
+De forma predeterminada, cada EML extraído del PST se convierte a PDF. Puede
+restringir opcionalmente la generación de PDFs a mensajes cuyos encabezados de
+participantes contengan al menos una dirección de correo de una lista.
+
+### Desde el asistente
+
+El paso 4/5 del asistente pregunta:
+
+```
+Enable email filter (y/n) [n*]:
+```
+
+Responda `y` y proporcione una lista separada por comas:
+
+```
+Enter email addresses, separated by commas:
+correo1@ejemplo.com, correo2@ejemplo.com
+```
+
+El asistente guarda la lista normalizada en `case_dir/config/filter_emails.txt`
+y una huella sha256 en `case_dir/config/filter_emails.fingerprint`.
+
+### Desde la línea de comandos (avanzado)
+
+```bash
+python3 -m pst_to_pdf.processor --case-dir /ruta/al/caso \
+  --filter-email a@x.com --filter-email b@y.com
+
+python3 -m pst_to_pdf.processor --case-dir /ruta/al/caso \
+  --filter-emails-file /ruta/a/correos.txt
+```
+
+El formato del archivo es un correo por línea; líneas en blanco y comentarios
+que empiezan con `#` se ignoran. Ambas opciones pueden combinarse; las
+direcciones se deduplican.
+
+### Cómo se comparan las direcciones
+
+Un mensaje coincide si alguna dirección en alguno de estos encabezados está en
+el conjunto del filtro:
+
+- `From`, `To`, `Cc`, `Bcc`, `Reply-To`, `Sender`
+
+La comparación es exacta (sin distinguir mayúsculas). El cuerpo, el asunto y
+los nombres de archivos adjuntos **no** se revisan.
+
+### Cómo se registran los mensajes no coincidentes
+
+Los EMLs no coincidentes no generan PDFs. En su lugar, el manifiesto registra
+una fila con `status=filtered`. Las filas filtradas cuentan como EMLs cubiertos
+en la validación y nunca hacen que la validación falle.
+
+### Cambiar el filtro
+
+Si desea usar un filtro diferente, cree un nuevo directorio de caso. Reejecutar
+con un filtro distinto en el mismo caso queda bloqueado por una verificación
+de huella; use `--force-filter` solo si está seguro de querer sobrescribir el
+filtro almacenado del caso.
+
 ## Desarrollo
 
 ```bash

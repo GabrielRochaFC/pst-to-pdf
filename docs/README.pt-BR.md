@@ -127,6 +127,67 @@ sudo apt install python3 python3-venv python3-pip pff-tools \
 
 `pff-tools` (`pffinfo`, `pffexport`) são ferramentas de inspeção alternativas; `readpst` é o extrator principal.
 
+## Filtragem por participante de e-mail
+
+Por padrão, todo EML extraído do PST é convertido em PDF. Você pode,
+opcionalmente, restringir a geração de PDFs a mensagens cujos cabeçalhos de
+participantes contenham pelo menos um endereço de uma lista.
+
+### Pelo assistente
+
+O passo 4/5 do assistente pergunta:
+
+```
+Enable email filter (y/n) [n*]:
+```
+
+Responda `y` e forneça uma lista separada por vírgulas:
+
+```
+Enter email addresses, separated by commas:
+email1@exemplo.com, email2@exemplo.com
+```
+
+O assistente salva a lista normalizada em `case_dir/config/filter_emails.txt`
+e uma impressão sha256 em `case_dir/config/filter_emails.fingerprint`.
+
+### Pela linha de comando (avançado)
+
+```bash
+python3 -m pst_to_pdf.processor --case-dir /caminho/para/o/caso \
+  --filter-email a@x.com --filter-email b@y.com
+
+python3 -m pst_to_pdf.processor --case-dir /caminho/para/o/caso \
+  --filter-emails-file /caminho/para/emails.txt
+```
+
+O formato do arquivo é um e-mail por linha; linhas em branco e linhas iniciadas
+com `#` são ignoradas. As duas opções podem ser combinadas; endereços são
+deduplicados.
+
+### Como a correspondência é feita
+
+Uma mensagem corresponde se qualquer endereço em qualquer destes cabeçalhos
+estiver no conjunto do filtro:
+
+- `From`, `To`, `Cc`, `Bcc`, `Reply-To`, `Sender`
+
+A comparação é exata (sem diferenciar maiúsculas). O corpo, o assunto e os
+nomes de anexos **não** são verificados.
+
+### Como mensagens não correspondentes são registradas
+
+EMLs sem correspondência não geram PDFs. Em vez disso, o manifesto registra
+uma linha com `status=filtered`. Linhas filtradas contam como EMLs cobertos na
+validação e nunca fazem a validação falhar.
+
+### Trocar o filtro
+
+Para usar um filtro diferente, crie um novo diretório de caso. Reexecutar com
+filtro diferente sobre o mesmo caso é bloqueado por uma verificação de
+impressão; use `--force-filter` apenas se realmente quiser sobrescrever o
+filtro armazenado do caso.
+
 ## Desenvolvimento
 
 ```bash

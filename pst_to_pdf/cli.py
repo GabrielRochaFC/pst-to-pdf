@@ -194,7 +194,7 @@ def unique_destination(input_dir: Path, source: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def choose_case_dir(allow_back: bool = False) -> Path:
-    print_section("Step 1/4 - Case directory")
+    print_section("Step 1/5 - Case directory")
     print("Choose where this case's processing folder will be stored.")
     print()
     print("  [e] Use an existing case directory")
@@ -238,7 +238,7 @@ def discover_psts(raw: str) -> list[Path]:
 
 def prompt_psts() -> tuple[list[Path], int]:
     """Returns (pst_paths, total_source_bytes). Does not copy files."""
-    print_section("Step 2/4 - PST source")
+    print_section("Step 2/5 - PST source")
     print("Enter either:")
     print("  - a folder containing .pst files")
     print("  - or comma-separated .pst file paths")
@@ -267,7 +267,7 @@ def prompt_settings(
     default_workers: int = DEFAULT_WORKERS,
     default_timeout: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[str, int, int]:
-    print_section("Step 3/4 - Conversion settings")
+    print_section("Step 3/5 - Conversion settings")
     mode = prompt_choice(
         "PDF mode",
         {"fast": "fast", "weasyprint": "weasyprint"},
@@ -278,6 +278,37 @@ def prompt_settings(
     workers = prompt_int("Workers", default_workers, minimum=1, allow_back=True)
     timeout_seconds = prompt_int("Timeout per email in seconds", default_timeout, minimum=0, allow_back=True)
     return mode, workers, timeout_seconds
+
+
+def prompt_email_filter(allow_back: bool = True) -> list[str]:
+    """Step: ask whether to filter, and if so collect a list of emails.
+
+    Returns an empty list when filtering is declined.
+    """
+    from pst_to_pdf.filter_emails import parse_email_list
+
+    print_section("Step 4/5 - Email filter")
+    print("Limit PDF generation to messages whose participant headers contain")
+    print("one of a list of email addresses (From, To, Cc, Bcc, Reply-To, Sender).")
+    print()
+    enable = prompt_choice(
+        "Enable email filter",
+        {"y": "yes", "n": "no"},
+        "n",
+        compact=False,
+        allow_back=allow_back,
+    )
+    if enable == "n":
+        return []
+    while True:
+        raw = prompt_text(
+            "Enter email addresses, separated by commas",
+            allow_back=True,
+        )
+        emails = parse_email_list(raw)
+        if emails:
+            return emails
+        print("  Enter at least one valid email address (for example: a@x.com, b@y.com).")
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +324,8 @@ def print_pre_copy_summary(
     timeout_seconds: int,
     dry_run: bool,
     validate_only: bool,
+    filter_emails: list[str],
+    filter_file: Path | None,
 ) -> None:
     print_kv("Case directory", case_dir)
     print_kv("PST files found", format_number(len(psts)))
@@ -308,6 +341,14 @@ def print_pre_copy_summary(
     else:
         print_kv("Dry run", format_bool(dry_run))
     print_kv("Validation only", format_bool(validate_only))
+    if filter_emails:
+        print_kv("Email filter", "yes")
+        print_kv("Included addresses", format_number(len(filter_emails)))
+        print_kv("Filter matches headers", "From, To, Cc, Bcc, Reply-To, Sender")
+        if filter_file is not None:
+            print_kv("Filter file", filter_file)
+    else:
+        print_kv("Email filter", "no")
     print()
     print("  No email body content will be printed.")
     print("  All output stays local.")
@@ -504,9 +545,11 @@ def main() -> int:
         mode = DEFAULT_MODE
         workers = DEFAULT_WORKERS
         timeout_seconds = DEFAULT_TIMEOUT_SECONDS
+        filter_emails: list[str] = []
+        filter_file_preview: Path | None = None
 
         step = 1
-        while step <= 4:
+        while step <= 5:
             try:
                 if step == 1:
                     case_dir = choose_case_dir(allow_back=False)
@@ -525,13 +568,23 @@ def main() -> int:
                     step = 4
 
                 elif step == 4:
+                    filter_emails = prompt_email_filter(allow_back=True)
+                    assert case_dir is not None
+                    filter_file_preview = (
+                        case_dir / "config" / "filter_emails.txt"
+                        if filter_emails else None
+                    )
+                    step = 5
+
+                elif step == 5:
                     assert case_dir is not None
                     assert psts is not None
-                    print_section("Step 4/4 - Review and confirm")
+                    print_section("Step 5/5 - Review and confirm")
                     print_pre_copy_summary(
                         case_dir, psts, pst_total_size,
                         mode, workers, timeout_seconds,
                         args.dry_run, args.validate_only,
+                        filter_emails, filter_file_preview,
                     )
                     print()
                     confirmed = prompt_confirm("Start processing?", default=True)
@@ -539,7 +592,7 @@ def main() -> int:
                         print()
                         print("Processing not started. No PST files were copied.")
                         return 0
-                    step = 5  # exit wizard loop
+                    step = 6  # exit wizard loop
 
             except GoBack:
                 step = max(1, step - 1)
@@ -574,6 +627,7 @@ def main() -> int:
                 force_extract=args.force_extract,
                 validate_only=args.validate_only,
                 dry_run=False,
+                filter_emails=filter_emails,
             )
         )
 
