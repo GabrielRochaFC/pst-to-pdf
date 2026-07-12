@@ -68,7 +68,9 @@ carpeta-del-caso/
 │       ├── eml/
 │       ├── pdf/
 │       └── manifest/<slug>.csv
-└── logs/
+├── logs/
+└── zipped/                  ← creado por `pst-to-pdf zip-pdfs`
+    └── <slug>-pdfs.zip
 ```
 
 Los slugs se derivan de los nombres de los archivos PST; las colisiones reciben un sufijo SHA-256.
@@ -117,6 +119,36 @@ python3 -m pst_to_pdf.repair_manifest \
   --slug example-user-001,example-user-005 \
   --apply
 ```
+
+### Comprimir los PDFs en ZIP
+
+Una vez procesado un caso, `pst-to-pdf zip-pdfs` recorre `output/` buscando
+cada carpeta `<slug>/pdf/` y empaqueta cada una en su propio archivo ZIP,
+listo para entregar — sin comprimir carpetas a mano ni recordar qué PST ya
+tienen PDFs.
+
+```bash
+pst-to-pdf zip-pdfs --case-dir "/mnt/hd/pst-pdf/example-user"
+
+# Vista previa de lo que se comprimiría, sin escribir ningún archivo
+pst-to-pdf zip-pdfs --case-dir "/mnt/hd/pst-pdf/example-user" --dry-run
+```
+
+Cada `<slug>-pdfs.zip` contiene solo los archivos `.pdf` de esa carpeta
+`pdf/` (sin subcarpetas, sin `logs/`, `manifest/`, `eml/` ni ningún otro
+archivo del caso). Los ZIP se escriben en `carpeta-del-caso/zipped/` (creada
+automáticamente) y se sobrescriben en cada ejecución. Las carpetas sin PDFs
+se omiten y se reportan, no se tratan como error.
+
+```
+carpeta-del-caso/zipped/
+├── example-user-001-pdfs.zip
+├── example-user-002-pdfs.zip
+└── example-user-003-pdfs.zip
+```
+
+Invocación equivalente por módulo: `python3 -m pst_to_pdf.zip_pdfs --case-dir ...`
+o `python3 scripts/zip_pdfs.py --case-dir ...`.
 
 ### Paquetes opcionales del sistema
 

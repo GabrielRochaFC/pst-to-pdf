@@ -458,7 +458,15 @@ def copy_psts(psts: list[Path], input_dir: Path) -> list[CopiedPst]:
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Interactive local PST to PDF conversion wizard.")
+    parser = argparse.ArgumentParser(
+        description="Interactive local PST to PDF conversion wizard.",
+        epilog=(
+            "Other commands:\n"
+            "  zip-pdfs --case-dir PATH   Zip PDF output folders for delivery.\n"
+            "                             Run 'pst-to-pdf zip-pdfs --help' for details."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--dry-run", action="store_true", help="Show planned summary without copying, extracting, or converting.")
     parser.add_argument("--validate-only", action="store_true", help="Run validation after preparing the case directory; do not extract or convert.")
     parser.add_argument("--force-extract", action="store_true", help="Run readpst even when EML files already exist.")
@@ -520,6 +528,11 @@ def print_dry_run_plan(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "zip-pdfs":
+        from pst_to_pdf.zip_pdfs import main as zip_pdfs_main
+
+        return zip_pdfs_main(sys.argv[2:])
+
     args = parse_args()
 
     if args.no_color:

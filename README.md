@@ -66,7 +66,9 @@ case-dir/
 │       ├── eml/
 │       ├── pdf/
 │       └── manifest/<slug>.csv
-└── logs/
+├── logs/
+└── zipped/                  ← created by `pst-to-pdf zip-pdfs`
+    └── <slug>-pdfs.zip
 ```
 
 Slugs are derived from PST filenames; collisions get a SHA-256 suffix.
@@ -115,6 +117,36 @@ python3 -m pst_to_pdf.repair_manifest \
   --slug example-user-001,example-user-005 \
   --apply
 ```
+
+### Zipping PDF output
+
+Once a case has been processed, `pst-to-pdf zip-pdfs` scans `output/` for every
+`<slug>/pdf/` folder and packages each one into its own ZIP archive, ready to
+hand off — no need to zip folders by hand or remember which PSTs already have
+PDFs.
+
+```bash
+pst-to-pdf zip-pdfs --case-dir "/mnt/hd/pst-pdf/example-user"
+
+# Preview what would be zipped without writing any files
+pst-to-pdf zip-pdfs --case-dir "/mnt/hd/pst-pdf/example-user" --dry-run
+```
+
+Each `<slug>-pdfs.zip` contains only the `.pdf` files from that PST's `pdf/`
+folder (flat, no `logs/`, `manifest/`, `eml/`, or other case files). ZIPs are
+written to `case-dir/zipped/` (created automatically) and are overwritten on
+every run. Folders with no PDFs yet are skipped and reported, not treated as
+errors.
+
+```
+case-dir/zipped/
+├── example-user-001-pdfs.zip
+├── example-user-002-pdfs.zip
+└── example-user-003-pdfs.zip
+```
+
+Equivalent standalone invocation: `python3 -m pst_to_pdf.zip_pdfs --case-dir ...`
+or `python3 scripts/zip_pdfs.py --case-dir ...`.
 
 ### Optional system packages
 

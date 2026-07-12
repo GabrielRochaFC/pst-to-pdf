@@ -40,9 +40,11 @@ python3 -m py_compile \
   pst_to_pdf/validator.py \
   pst_to_pdf/extraction.py \
   pst_to_pdf/repair_manifest.py \
+  pst_to_pdf/zip_pdfs.py \
   scripts/convert_eml_to_pdf.py \
   scripts/process_user_psts.py \
-  scripts/validate_outputs.py
+  scripts/validate_outputs.py \
+  scripts/zip_pdfs.py
 ```
 
 **Shell syntax check:**
@@ -78,6 +80,8 @@ pst-to-pdf (cli.py wizard)
 
 - **`pst_to_pdf/repair_manifest.py`** — Safe manifest deduplication: removes duplicate `eml_path` rows (keeping the best-status row), creates a timestamped backup before writing, never deletes EML/PDF files. Default is dry-run; pass `--apply` to write.
 
+- **`pst_to_pdf/zip_pdfs.py`** — Discovers every `output/<slug>/pdf/` folder in a case and zips each into `zipped/<slug>-pdfs.zip` (flat, PDFs only). Exposed as the `pst-to-pdf zip-pdfs --case-dir PATH [--dry-run]` subcommand (dispatched in `cli.py:main()` before the wizard's `parse_args()` runs) and as `python -m pst_to_pdf.zip_pdfs` / `scripts/zip_pdfs.py`. Always overwrites existing ZIPs; folders with zero PDFs are skipped, not treated as errors.
+
 - **`pst_to_pdf/output.py`** — Shared CLI formatting: ANSI color helpers (`green`, `yellow`, `red`, `bold`), `print_section`/`print_kv` layout, and `write_dynamic_line`/`finish_dynamic_line` for in-place TTY progress (falls back to plain lines on non-TTY).
 
 ### Key design decisions
@@ -97,6 +101,7 @@ case-dir/
     pdf/          ← generated PDFs
     manifest/     ← <slug>.csv
   logs/           ← extract and convert logs
+  zipped/         ← <slug>-pdfs.zip, created by `pst-to-pdf zip-pdfs`
 ```
 
 Slugs are derived from PST filenames: email addresses are collapsed to `local-NNN`, special characters replaced with `-`. Collisions get a SHA-256 suffix.
